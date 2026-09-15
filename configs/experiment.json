@@ -1,0 +1,8 @@
+{
+  "model_path": "/var/lib/docker/models/DeepSeek-V4-Flash-0731",
+  "input_path": "/data/hjh/Automation/input_data_0831.jsonl",
+  "image": "mirrors.sangfor.com/lmsysorg/sglang@sha256:50bc0c7713550a2f2e38c0d7d5d928c2f9093e1dbc703c0bdc66871f25fea004",
+  "smoke": false,
+  "gpu_indexes": [6, 7],
+  "output_dir": "/data/hjh/Automation/results"
+}

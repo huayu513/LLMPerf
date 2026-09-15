@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automation Console</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Automation 调试控制台</h1>
+      <p>单台服务器上的计划预览、运行监控、日志排查和单参数重跑。</p>
+    </div>
+    <div class="server-state" id="server-state">加载中...</div>
+  </header>
+
+  <main>
+    <section class="panel controls">
+      <label>
+        结果目录
+        <input id="result-root" spellcheck="false">
+      </label>
+      <label>
+        配置文件
+        <input id="config-path" spellcheck="false">
+      </label>
+      <div class="button-row">
+        <button id="refresh-runs">刷新结果</button>
+        <button id="plan-run">生成计划</button>
+        <button id="auto-run">直接 Auto</button>
+      </div>
+      <p class="hint">默认结果目录是 /data/hjh/Automation/results。生成计划会先创建 result_dir 和 plan.json，不会直接跑压测。</p>
+    </section>
+
+    <section class="layout">
+      <aside class="panel sidebar">
+        <div class="section-title">
+          <h2>Runs</h2>
+          <span id="run-count"></span>
+        </div>
+        <div id="runs" class="list empty">暂无数据</div>
+      </aside>
+
+      <section class="workspace">
+        <section class="panel" id="run-summary">
+          <div class="section-title">
+            <h2>运行概览</h2>
+            <div class="button-row compact">
+              <button id="run-plan" disabled>开始搜索</button>
+              <button id="resume-run" disabled>严格 Resume</button>
+              <button id="adopt-runtime" disabled>接受当前代码 Resume</button>
+              <button id="collect-run" disabled>Collect</button>
+            </div>
+          </div>
+          <div id="summary-content" class="empty">请选择一个 run。</div>
+        </section>
+
+        <section class="tabs">
+          <button class="tab active" data-tab="candidates">规划</button>
+          <button class="tab" data-tab="trials">Trials</button>
+          <button class="tab" data-tab="artifacts">日志/Artifact</button>
+          <button class="tab" data-tab="jobs">Jobs</button>
+        </section>
+
+        <section class="panel tab-panel active" id="tab-candidates">
+          <div class="section-title">
+            <h2>候选规划</h2>
+            <div class="table-tools">
+              <label class="inline-control">
+                排序
+                <select id="candidate-sort">
+                  <option value="plan">Plan 顺序</option>
+                  <option value="output_desc">Output 降序</option>
+                </select>
+              </label>
+              <input id="candidate-filter" class="filter" placeholder="过滤 candidate / backend / 状态">
+            </div>
+          </div>
+          <div id="candidates" class="table-wrap empty">暂无候选。</div>
+        </section>
+
+        <section class="panel tab-panel" id="tab-trials">
+          <div class="section-title">
+            <h2>Trial 结果</h2>
+            <div class="table-tools">
+              <label class="inline-control">
+                排序
+                <select id="trial-sort">
+                  <option value="plan">Plan 顺序</option>
+                  <option value="output_desc">Output 降序</option>
+                </select>
+              </label>
+              <input id="trial-filter" class="filter" placeholder="过滤 task / candidate / reason / 状态">
+            </div>
+          </div>
+          <div id="trials" class="table-wrap empty">暂无 trial。</div>
+        </section>
+
+        <section class="panel tab-panel" id="tab-artifacts">
+          <div class="section-title">
+            <h2>日志和 Artifact</h2>
+            <span id="artifact-title" class="muted">点 candidate 或 trial 后查看</span>
+          </div>
+          <div class="artifact-layout">
+            <div id="artifact-list" class="list empty">暂无 artifact。</div>
+            <div class="artifact-view">
+              <div class="artifact-toolbar">
+                <span id="artifact-path" class="muted"></span>
+                <button id="reload-artifact" disabled>刷新</button>
+              </div>
+              <pre id="artifact-content">未选择文件。</pre>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel tab-panel" id="tab-jobs">
+          <div class="section-title">
+            <h2>后台任务</h2>
+            <div class="button-row compact">
+              <button id="stop-job" disabled>停止选中任务</button>
+              <button id="refresh-jobs">刷新 Jobs</button>
+            </div>
+          </div>
+          <div id="jobs" class="list empty">暂无后台任务。</div>
+          <pre id="job-output">未选择 job。</pre>
+        </section>
+      </section>
+    </section>
+
+    <section class="drawer" id="candidate-drawer" aria-hidden="true">
+      <div class="drawer-card">
+        <div class="section-title">
+          <h2 id="drawer-title">Candidate</h2>
+          <button id="close-drawer">关闭</button>
+        </div>
+        <div id="candidate-detail" class="detail-grid"></div>
+        <div class="button-row">
+          <button id="debug-rerun">单独重跑这个参数</button>
+          <button id="show-candidate-artifacts">查看日志</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
