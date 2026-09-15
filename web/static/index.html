@@ -100,7 +100,10 @@
         <section class="panel tab-panel" id="tab-artifacts">
           <div class="section-title">
             <h2>日志和 Artifact</h2>
-            <span id="artifact-title" class="muted">点 candidate 或 trial 后查看</span>
+            <div class="button-row compact">
+              <span id="artifact-title" class="muted">双击 candidate 或 trial 后查看</span>
+              <button id="repair-trial" disabled>修复并重跑这次 Trial</button>
+            </div>
           </div>
           <div class="artifact-layout">
             <div id="artifact-list" class="list empty">暂无 artifact。</div>

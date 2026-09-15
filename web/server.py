@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import mimetypes
 import os
 import signal
@@ -266,6 +267,14 @@ def _decorate_trial_rows(run_dir: Path, rows: list[dict[str, Any]]) -> list[dict
         if task_id is not None and str(task_id) in task_order:
             item["trial_order"] = task_order[str(task_id)]
         decorated.append(item)
+    decorated.sort(key=lambda item: (
+        item.get("plan_order") is None,
+        int(item.get("plan_order") if item.get("plan_order") is not None else 1_000_000),
+        item.get("trial_order") is None,
+        int(item.get("trial_order") if item.get("trial_order") is not None else 1_000_000),
+        str(item.get("task_id") or item.get("id") or ""),
+        int(item.get("attempt") or 0),
+    ))
     return decorated
 
 
@@ -509,7 +518,7 @@ class JobManager:
         self._jobs: dict[str, dict[str, Any]] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
 
-    def create_subprocess(self, name: str, argv: list[str], cwd: Path) -> dict[str, Any]:
+    def create_subprocess(self, name: str, argv: list[str], cwd: Path, target_run: Path | None = None) -> dict[str, Any]:
         job_id = uuid.uuid4().hex[:12]
         job = {
             "id": job_id,
@@ -517,6 +526,7 @@ class JobManager:
             "kind": "subprocess",
             "argv": argv,
             "cwd": str(cwd),
+            "target_run": str(target_run.resolve()) if target_run is not None else None,
             "status": "running",
             "returncode": None,
             "pid": None,
@@ -534,7 +544,14 @@ class JobManager:
         thread.start()
         return self.get(job_id)
 
-    def create_function(self, name: str, func, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    def create_function(
+        self,
+        name: str,
+        func,
+        *args: Any,
+        target_run: Path | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex[:12]
         job = {
             "id": job_id,
@@ -542,6 +559,7 @@ class JobManager:
             "kind": "function",
             "argv": [],
             "cwd": str(AUTOMATION_ROOT),
+            "target_run": str(target_run.resolve()) if target_run is not None else None,
             "status": "running",
             "returncode": None,
             "started_at": utc_now(),
@@ -658,6 +676,19 @@ class JobManager:
         jobs.sort(key=lambda job: job.get("started_at") or "", reverse=True)
         return jobs
 
+    def running_for_run(self, run_dir: Path) -> list[dict[str, Any]]:
+        target = str(run_dir.resolve())
+        plan_path = str((run_dir / "plan.json").resolve())
+        with self._lock:
+            jobs = []
+            for job in self._jobs.values():
+                if job.get("status") != "running":
+                    continue
+                argv = [str(arg) for arg in job.get("argv", [])]
+                if job.get("target_run") == target or plan_path in argv:
+                    jobs.append(copy.deepcopy(job))
+            return jobs
+
     def stop(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             if job_id not in self._jobs:
@@ -710,7 +741,7 @@ def run_saved_plan_job(run_dir: Path, resume: bool = False) -> dict[str, Any]:
     argv = benchctl_argv("run", "--plan", str(run_dir / "plan.json"))
     if resume:
         argv.append("--resume")
-    return JOBS.create_subprocess("resume" if resume else "run", argv, AUTOMATION_ROOT)
+    return JOBS.create_subprocess("resume" if resume else "run", argv, AUTOMATION_ROOT, target_run=run_dir)
 
 
 def run_auto_job(config_path: Path) -> dict[str, Any]:
@@ -793,6 +824,260 @@ def find_candidate(plan_doc: dict[str, Any], candidate_id: str) -> dict[str, Any
         if isinstance(candidate, dict) and candidate.get("id") == candidate_id:
             return candidate
     raise ValueError("candidate not found")
+
+
+def find_candidate_optional(plan_doc: dict[str, Any], candidate_id: str) -> dict[str, Any] | None:
+    try:
+        return find_candidate(plan_doc, candidate_id)
+    except ValueError:
+        return None
+
+
+def task_id_from_row(row: dict[str, Any]) -> str:
+    raw = row.get("task_id") or row.get("id")
+    if raw:
+        return str(raw)
+    manifest = row.get("manifest")
+    if isinstance(manifest, str):
+        parts = PurePosixPath(manifest).parts
+        if len(parts) >= 4 and parts[0] == "trials":
+            return parts[1]
+    raise ValueError("trial task_id is required")
+
+
+def trial_row_matches(row: dict[str, Any], *, task_id: str, attempt: str, manifest: str) -> bool:
+    if manifest and str(row.get("manifest") or "") == manifest:
+        return True
+    row_task = str(row.get("task_id") or row.get("id") or "")
+    if task_id and row_task == task_id:
+        return not attempt or str(row.get("attempt") or "") == str(attempt)
+    return False
+
+
+def find_official_trial_row(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(body.get("task_id") or "")
+    attempt = str(body.get("attempt") or "")
+    manifest = str(body.get("manifest") or "")
+    for row in trial_rows(run_dir, include_debug=False):
+        if trial_row_matches(row, task_id=task_id, attempt=attempt, manifest=manifest):
+            return row
+    raise ValueError("official trial not found")
+
+
+def repair_candidate_config(plan_doc: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = str(row.get("candidate_id") or "")
+    if not candidate_id:
+        raise ValueError("trial candidate_id is required")
+    planned = find_candidate_optional(plan_doc, candidate_id)
+    if planned is not None:
+        return copy.deepcopy(planned)
+
+    for key in ("planned_configuration", "configuration"):
+        value = row.get(key)
+        if isinstance(value, dict) and value.get("id") == candidate_id:
+            return copy.deepcopy(value)
+
+    if "-tune-" in candidate_id:
+        base_id = candidate_id.split("-tune-", 1)[0]
+        base = find_candidate_optional(plan_doc, base_id)
+        static = row.get("effective_static_config")
+        if base is not None and isinstance(static, dict):
+            tuned = copy.deepcopy(base)
+            tuned["id"] = candidate_id
+            tuned["static_config"] = copy.deepcopy(static)
+            tuned["config_hash"] = str(row.get("candidate_hash") or fingerprint(static))
+            return tuned
+
+    raise ValueError("candidate config for this trial is not available")
+
+
+def plan_task_from_trial_row(row: dict[str, Any], candidate: dict[str, Any]) -> PlanTask:
+    task_id = task_id_from_row(row)
+    candidate_id = str(row.get("candidate_id") or candidate.get("id") or "")
+    if not candidate_id:
+        raise ValueError("trial candidate_id is required")
+    run_class = str(row.get("run_class") or "concurrency")
+    if run_class not in {"smoke", "concurrency", "tuning", "final_repeat", "open_loop", "diagnostic", "formal"}:
+        raise ValueError("invalid run_class")
+    mode = str(row.get("mode") or ("open-loop" if row.get("scale") is not None else "closed-loop")).replace("_", "-")
+    if mode not in {"closed-loop", "open-loop"}:
+        raise ValueError("mode must be closed-loop or open-loop")
+    concurrency = row.get("concurrency")
+    if concurrency is None:
+        raise ValueError("trial concurrency is required")
+    scale = row.get("scale")
+    return PlanTask(
+        id=task_id,
+        stage=5 if run_class == "final_repeat" else 3,
+        candidate_id=candidate_id,
+        run_class=run_class,
+        mode=mode,
+        concurrency=max(1, int(concurrency)),
+        scale=float(scale) if scale is not None else None,
+        candidate_hash=str(row.get("candidate_hash") or candidate.get("config_hash") or ""),
+    )
+
+
+def normalize_trial_result(result: dict[str, Any]) -> dict[str, Any]:
+    value = result.get("output_tokens_per_second")
+    if (
+        result.get("status") == "VALID"
+        and not (
+            type(value) in (int, float)
+            and math.isfinite(float(value))
+            and float(value) > 0
+        )
+    ):
+        result.update(
+            status="INCONCLUSIVE",
+            output_tokens_per_second=None,
+            reasons=["invalid_throughput_measurement"],
+        )
+    return result
+
+
+def next_repair_attempt(run_dir: Path, task_id: str, history: list[Any]) -> tuple[int, Path]:
+    attempt = len(history) + 1
+    while True:
+        attempt_dir = run_dir / "trials" / task_id / f"attempt-{attempt:03d}"
+        if not attempt_dir.exists():
+            return attempt, attempt_dir
+        attempt += 1
+
+
+def official_repair_worker(
+    emit,
+    run_dir: Path,
+    selector: dict[str, Any],
+) -> dict[str, Any]:
+    row = find_official_trial_row(run_dir, selector)
+    plan = load_plan(run_dir / "plan.json")
+    plan_doc = plan_to_dict(plan)
+    metadata = copy.deepcopy(plan.metadata)
+    candidates = {c["id"]: c for c in plan_doc.get("candidates", []) if isinstance(c, dict) and c.get("id")}
+    candidate = repair_candidate_config(plan_doc, row)
+    candidates[str(candidate["id"])] = candidate
+    metadata["candidates"] = candidates
+    metadata["benchmark_dir"] = str(AUTOMATION_ROOT / "benchmarks")
+    metadata["repair_current_bundle_fingerprint"] = _bundle_fingerprint()
+
+    task = plan_task_from_trial_row(row, candidate)
+    state_path = run_dir / "search-state.json"
+    state = json_load(state_path, {})
+    if not isinstance(state, dict):
+        raise ValueError("search-state.json is not a JSON object")
+    if "trials" not in state:
+        state["trials"] = {}
+    if not isinstance(state["trials"], dict):
+        raise ValueError("search-state.json.trials is not a JSON object")
+    history = state["trials"].setdefault(task.id, [])
+    if not isinstance(history, list):
+        raise ValueError(f"search-state trial history for {task.id} is not a list")
+    if "plan_hash" not in state:
+        state["plan_hash"] = fingerprint(plan_doc)
+
+    attempt, attempt_dir = next_repair_attempt(run_dir, task.id, history)
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    trial_path = attempt_dir / "trial.json"
+    entry = {
+        "manifest": str(trial_path.relative_to(run_dir)),
+        "task": asdict(task),
+        "fingerprint": None,
+        "repair": {
+            "created_at": utc_now(),
+            "source_manifest": row.get("manifest"),
+            "source_attempt": row.get("attempt"),
+        },
+    }
+    history.append(entry)
+    write_json_atomic(state_path, state)
+
+    emit(json.dumps({
+        "event": "official_repair_start",
+        "task": task.id,
+        "attempt": attempt,
+        "candidate_id": task.candidate_id,
+        "run_class": task.run_class,
+        "concurrency": task.concurrency,
+    }, ensure_ascii=False))
+
+    adapter = ReplayAdapter(metadata, run_dir / "trials")
+    exit_code = 0
+    result: dict[str, Any] | None = None
+    try:
+        attempt_dir = Path(adapter(task, attempt))
+    except RuntimeError:
+        exit_code = 1
+    except Exception as exc:
+        result = {
+            "status": "FAILED",
+            "reasons": [f"{type(exc).__name__}: {exc}"],
+            "output_tokens_per_second": None,
+        }
+        result.update({
+            "task_id": task.id,
+            "candidate_id": task.candidate_id,
+            "concurrency": task.concurrency,
+            "mode": task.mode,
+            "scale": task.scale,
+            "run_class": task.run_class,
+            "attempt": attempt,
+            "candidate_hash": task.candidate_hash,
+            "result_path": str(attempt_dir),
+            "manifest": str(trial_path.relative_to(run_dir)),
+            "repair_current_bundle_fingerprint": metadata["repair_current_bundle_fingerprint"],
+        })
+        write_json_atomic(trial_path, result)
+    if result is None:
+        result = read_attempt(attempt_dir, task, metadata, exit_code=exit_code)
+        result = normalize_trial_result(dict(result))
+        result.update({
+            "task_id": task.id,
+            "candidate_id": task.candidate_id,
+            "concurrency": task.concurrency,
+            "mode": task.mode,
+            "scale": task.scale,
+            "run_class": task.run_class,
+            "attempt": attempt,
+            "candidate_hash": task.candidate_hash,
+            "result_path": str(attempt_dir),
+            "manifest": str(trial_path.relative_to(run_dir)),
+            "repair_current_bundle_fingerprint": metadata["repair_current_bundle_fingerprint"],
+        })
+        write_json_atomic(trial_path, result)
+
+    entry["fingerprint"] = fingerprint(result)
+    entry["repair"]["finished_at"] = utc_now()
+    entry["repair"]["status"] = result.get("status")
+    write_json_atomic(state_path, state)
+    collected = collect_results(run_dir)
+    emit(json.dumps({
+        "event": "official_repair_done",
+        "task": task.id,
+        "attempt": attempt,
+        "status": result.get("status"),
+        "rows": len(collected.get("rows", [])),
+    }, ensure_ascii=False))
+    return result
+
+
+def start_official_repair(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
+    conflicts = JOBS.running_for_run(run_dir)
+    if conflicts:
+        names = ", ".join(f"{job.get('name')}:{job.get('id')}" for job in conflicts)
+        raise ValueError(f"run has active jobs; stop or wait first: {names}")
+    selector = {
+        "task_id": body.get("task_id"),
+        "attempt": body.get("attempt"),
+        "manifest": body.get("manifest"),
+    }
+    return JOBS.create_function(
+        "repair-trial",
+        official_repair_worker,
+        run_dir,
+        selector,
+        target_run=run_dir,
+    )
 
 
 def debug_rerun_worker(
@@ -884,6 +1169,7 @@ def start_debug_rerun(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
         body.get("run_class"),
         body.get("mode"),
         scale,
+        target_run=run_dir,
     )
 
 
@@ -1021,6 +1307,8 @@ class AutomationHandler(BaseHTTPRequestHandler):
                 return self.send_json(adopt_current_runtime(run_dir, str(body.get("note") or "")))
             if parts[2:] == ["debug-rerun"]:
                 return self.send_json(start_debug_rerun(run_dir, body), HTTPStatus.ACCEPTED)
+            if parts[2:] == ["repair-trial"]:
+                return self.send_json(start_official_repair(run_dir, body), HTTPStatus.ACCEPTED)
         self.send_error_json(HTTPStatus.NOT_FOUND, "unknown endpoint")
 
     def serve_static(self, raw_path: str) -> None:
