@@ -36,6 +36,7 @@ if str(AUTOMATION_ROOT) not in sys.path:
 
 from automation.adapters import ReplayAdapter, read_attempt  # noqa: E402
 from automation.artifacts import write_json_atomic  # noqa: E402
+from automation.docker_runtime import DockerRuntime  # noqa: E402
 from automation.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
 from automation.search import _candidate_gpu_count, _start_concurrency, collect_results  # noqa: E402
 from automation.types import PlanTask  # noqa: E402
@@ -512,6 +513,81 @@ def list_artifacts_for_base(run_dir: Path, base_path: Path) -> list[dict[str, An
     return result
 
 
+class JobCancelled(Exception):
+    """Raised when a web-console job is stopped by the user."""
+
+
+class JobControl:
+    def __init__(self, manager: Any, job_id: str):
+        self.manager = manager
+        self.job_id = job_id
+
+    def stop_requested(self) -> bool:
+        return self.manager.is_stop_requested(self.job_id)
+
+    def check(self) -> None:
+        if self.stop_requested():
+            raise JobCancelled("job stopped by user")
+
+    def set_active_container(self, name: str) -> None:
+        self.manager.set_active_container(self.job_id, name)
+
+    def clear_active_container(self, name: str) -> None:
+        self.manager.clear_active_container(self.job_id, name)
+
+
+class StoppableDockerRuntime(DockerRuntime):
+    def __init__(self, control: JobControl):
+        super().__init__()
+        self.control = control
+
+    def _stream_run(self, command, log_path):
+        self.control.check()
+        process = subprocess.Popen(
+            list(command),
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=(os.name != "nt"),
+        )
+
+        def read_output() -> None:
+            stream = process.stdout
+            if stream is None:
+                return
+            with Path(log_path).open("a", encoding="utf-8") as log:
+                for chunk in stream:
+                    log.write(str(chunk))
+                    log.flush()
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        stop_sent = False
+        while True:
+            code = process.poll()
+            if code is not None:
+                break
+            if self.control.stop_requested() and not stop_sent:
+                stop_sent = True
+                try:
+                    if os.name != "nt":
+                        os.killpg(process.pid, signal.SIGINT)
+                    else:
+                        process.send_signal(signal.CTRL_BREAK_EVENT if hasattr(signal, "CTRL_BREAK_EVENT") else signal.SIGINT)
+                except ProcessLookupError:
+                    pass
+                except Exception:
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+            time.sleep(0.5)
+        reader.join(timeout=5)
+        return int(process.returncode if process.returncode is not None else code)
+
+
 class JobManager:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -531,6 +607,7 @@ class JobManager:
             "returncode": None,
             "pid": None,
             "stop_requested": False,
+            "active_container": None,
             "started_at": utc_now(),
             "finished_at": None,
             "lines": [],
@@ -562,6 +639,8 @@ class JobManager:
             "target_run": str(target_run.resolve()) if target_run is not None else None,
             "status": "running",
             "returncode": None,
+            "stop_requested": False,
+            "active_container": None,
             "started_at": utc_now(),
             "finished_at": None,
             "lines": [],
@@ -631,7 +710,7 @@ class JobManager:
                     break
             with self._lock:
                 job = self._jobs[job_id]
-                job["status"] = "exited"
+                job["status"] = "stopped" if job.get("stop_requested") else "exited"
                 job["returncode"] = returncode
                 job["finished_at"] = utc_now()
                 job["result"] = result
@@ -647,20 +726,32 @@ class JobManager:
                 self._processes.pop(job_id, None)
 
     def _run_function(self, job_id: str, func, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        control = JobControl(self, job_id)
         try:
-            result = func(lambda line: self._append_line(job_id, line), *args, **kwargs)
+            control.check()
+            result = func(lambda line: self._append_line(job_id, line), control, *args, **kwargs)
             with self._lock:
                 job = self._jobs[job_id]
                 job["status"] = "exited"
                 job["returncode"] = 0
                 job["finished_at"] = utc_now()
                 job["result"] = result
+                job["active_container"] = None
+        except JobCancelled as exc:
+            with self._lock:
+                job = self._jobs[job_id]
+                job["status"] = "stopped"
+                job["returncode"] = 130
+                job["finished_at"] = utc_now()
+                job["active_container"] = None
+                job["lines"].append(str(exc))
         except Exception as exc:
             with self._lock:
                 job = self._jobs[job_id]
                 job["status"] = "error"
                 job["returncode"] = 1
                 job["finished_at"] = utc_now()
+                job["active_container"] = None
                 job["error"] = f"{type(exc).__name__}: {exc}"
                 job["lines"].append(traceback.format_exc())
 
@@ -676,6 +767,22 @@ class JobManager:
         jobs.sort(key=lambda job: job.get("started_at") or "", reverse=True)
         return jobs
 
+    def is_stop_requested(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job.get("stop_requested"))
+
+    def set_active_container(self, job_id: str, name: str) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id]["active_container"] = name
+
+    def clear_active_container(self, job_id: str, name: str) -> None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job and job.get("active_container") == name:
+                job["active_container"] = None
+
     def running_for_run(self, run_dir: Path) -> list[dict[str, Any]]:
         target = str(run_dir.resolve())
         plan_path = str((run_dir / "plan.json").resolve())
@@ -690,31 +797,63 @@ class JobManager:
             return jobs
 
     def stop(self, job_id: str) -> dict[str, Any]:
+        pid: int | None = None
+        process = None
+        active_container: str | None = None
         with self._lock:
             if job_id not in self._jobs:
                 raise KeyError(job_id)
             job = self._jobs[job_id]
-            process = self._processes.get(job_id)
-            if job.get("status") != "running" or process is None:
+            if job.get("status") != "running":
                 return copy.deepcopy(job)
+            if job.get("stop_requested"):
+                return copy.deepcopy(job)
+            process = self._processes.get(job_id)
             job["stop_requested"] = True
             job["lines"].append("stop requested from web console")
-            pid = process.pid
-        try:
-            if os.name != "nt":
-                os.killpg(pid, signal.SIGINT)
-            else:
-                process.send_signal(signal.CTRL_BREAK_EVENT if hasattr(signal, "CTRL_BREAK_EVENT") else signal.SIGINT)
-        except ProcessLookupError:
-            pass
-        except Exception as exc:
-            with self._lock:
-                self._jobs[job_id]["lines"].append(f"failed to send stop signal: {type(exc).__name__}: {exc}")
+            if process is not None:
+                pid = process.pid
+            container = job.get("active_container")
+            active_container = str(container) if container else None
+        if pid is not None and process is not None:
+            try:
+                if os.name != "nt":
+                    os.killpg(pid, signal.SIGINT)
+                else:
+                    process.send_signal(signal.CTRL_BREAK_EVENT if hasattr(signal, "CTRL_BREAK_EVENT") else signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                with self._lock:
+                    self._jobs[job_id]["lines"].append(f"failed to send stop signal: {type(exc).__name__}: {exc}")
+        if active_container:
+            try:
+                result = subprocess.run(
+                    ["docker", "rm", "-f", active_container],
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if job is not None:
+                        if result.returncode == 0:
+                            job["lines"].append(f"removed active container {active_container}")
+                        else:
+                            message = (result.stderr or result.stdout or "").strip()
+                            job["lines"].append(f"failed to remove active container {active_container}: {message}")
+            except FileNotFoundError:
+                with self._lock:
+                    self._jobs[job_id]["lines"].append("failed to remove active container: docker not found")
+            except Exception as exc:
+                with self._lock:
+                    self._jobs[job_id]["lines"].append(f"failed to remove active container: {type(exc).__name__}: {exc}")
         return self.get(job_id)
 
     def stop_all(self) -> None:
         with self._lock:
-            ids = list(self._processes)
+            ids = [job_id for job_id, job in self._jobs.items() if job.get("status") == "running"]
         for job_id in ids:
             try:
                 self.stop(job_id)
@@ -817,6 +956,97 @@ def append_debug_row(run_dir: Path, row: dict[str, Any]) -> None:
     rows = document.get("rows", []) if isinstance(document, dict) and isinstance(document.get("rows"), list) else []
     rows.append(row)
     write_json_atomic(path, {"version": 1, "run_id": run_dir.name, "rows": rows})
+
+
+def result_score(result: dict[str, Any]) -> float | None:
+    value = result.get("output_tokens_per_second")
+    if (
+        result.get("status") == "VALID"
+        and type(value) in (int, float)
+        and math.isfinite(float(value))
+        and float(value) > 0
+    ):
+        return float(value)
+    return None
+
+
+def load_debug_context(run_dir: Path, candidate_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
+    plan = load_plan(run_dir / "plan.json")
+    plan_doc = plan_to_dict(plan)
+    metadata = copy.deepcopy(plan.metadata)
+    candidates = {c["id"]: c for c in plan_doc.get("candidates", []) if isinstance(c, dict) and c.get("id")}
+    candidate = find_candidate(plan_doc, candidate_id)
+    metadata["candidates"] = candidates
+    metadata["benchmark_dir"] = str(AUTOMATION_ROOT / "benchmarks")
+    metadata["debug_current_bundle_fingerprint"] = _bundle_fingerprint()
+    return plan_doc, metadata, candidates, candidate
+
+
+def run_debug_attempt(
+    emit,
+    control: JobControl,
+    run_dir: Path,
+    metadata: dict[str, Any],
+    candidate: dict[str, Any],
+    candidate_id: str,
+    concurrency: int,
+    run_class: str,
+    mode: str,
+    scale: float | None,
+    task_prefix: str = "debug",
+) -> dict[str, Any]:
+    control.check()
+    task_id = task_prefix + "-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+    task = PlanTask(
+        id=task_id,
+        stage=3,
+        candidate_id=candidate_id,
+        run_class=run_class,
+        mode=mode,
+        concurrency=max(1, int(concurrency)),
+        scale=scale,
+        candidate_hash=str(candidate.get("config_hash") or ""),
+    )
+    debug_root = run_dir / "debug-trials" / candidate_id
+    adapter = ReplayAdapter(metadata, debug_root, runtime=StoppableDockerRuntime(control))
+    emit(json.dumps({"event": "debug_trial", "task": task.id, "attempt": 1, "run_class": run_class, "concurrency": task.concurrency}, ensure_ascii=False))
+    attempt_dir = debug_root / task.id / "attempt-001"
+    exit_code = 0
+    result: dict[str, Any] | None = None
+    try:
+        attempt_dir = run_replay_attempt(adapter, task, 1, control)
+    except JobCancelled:
+        raise
+    except RuntimeError:
+        control.check()
+        exit_code = 1
+    except Exception as exc:
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "status": "FAILED",
+            "reasons": [f"{type(exc).__name__}: {exc}"],
+            "output_tokens_per_second": None,
+        }
+    if result is None:
+        result = read_attempt(attempt_dir, task, metadata, exit_code=exit_code)
+        result = normalize_trial_result(dict(result))
+    result.update({
+        "task_id": task.id,
+        "candidate_id": candidate_id,
+        "concurrency": task.concurrency,
+        "mode": mode,
+        "scale": scale,
+        "run_class": run_class,
+        "attempt": 1,
+        "candidate_hash": task.candidate_hash,
+        "debug": True,
+        "result_path": str(attempt_dir),
+        "manifest": str((attempt_dir / "trial.json").relative_to(run_dir)),
+        "current_bundle_fingerprint": metadata["debug_current_bundle_fingerprint"],
+    })
+    write_json_atomic(attempt_dir / "trial.json", result)
+    append_debug_row(run_dir, result)
+    return result
 
 
 def find_candidate(plan_doc: dict[str, Any], candidate_id: str) -> dict[str, Any]:
@@ -936,6 +1166,23 @@ def normalize_trial_result(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def run_replay_attempt(adapter: ReplayAdapter, task: PlanTask, attempt: int, control: JobControl) -> Path:
+    attempt_dir = adapter.run_root / task.id / f"attempt-{attempt:03d}"
+    control.check()
+    spec = adapter.build_spec(task, attempt, attempt_dir)
+    control.set_active_container(spec.name)
+    try:
+        result = adapter.runtime.run(spec, attempt_dir / "docker.log")
+    finally:
+        control.clear_active_container(spec.name)
+    control.check()
+    exit_path = attempt_dir / "container-exit-code"
+    exit_temp = attempt_dir / ".container-exit-code.tmp"
+    exit_temp.write_text(f"{result.exit_code}\n", encoding="utf-8")
+    exit_temp.replace(exit_path)
+    return attempt_dir
+
+
 def next_repair_attempt(run_dir: Path, task_id: str, history: list[Any]) -> tuple[int, Path]:
     attempt = len(history) + 1
     while True:
@@ -947,9 +1194,11 @@ def next_repair_attempt(run_dir: Path, task_id: str, history: list[Any]) -> tupl
 
 def official_repair_worker(
     emit,
+    control: JobControl,
     run_dir: Path,
     selector: dict[str, Any],
 ) -> dict[str, Any]:
+    control.check()
     row = find_official_trial_row(run_dir, selector)
     plan = load_plan(run_dir / "plan.json")
     plan_doc = plan_to_dict(plan)
@@ -1001,12 +1250,15 @@ def official_repair_worker(
         "concurrency": task.concurrency,
     }, ensure_ascii=False))
 
-    adapter = ReplayAdapter(metadata, run_dir / "trials")
+    adapter = ReplayAdapter(metadata, run_dir / "trials", runtime=StoppableDockerRuntime(control))
     exit_code = 0
     result: dict[str, Any] | None = None
     try:
-        attempt_dir = Path(adapter(task, attempt))
+        attempt_dir = run_replay_attempt(adapter, task, attempt, control)
+    except JobCancelled:
+        raise
     except RuntimeError:
+        control.check()
         exit_code = 1
     except Exception as exc:
         result = {
@@ -1082,6 +1334,7 @@ def start_official_repair(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]
 
 def debug_rerun_worker(
     emit,
+    control: JobControl,
     run_dir: Path,
     candidate_id: str,
     concurrency: int | None,
@@ -1089,12 +1342,9 @@ def debug_rerun_worker(
     mode: str | None,
     scale: float | None,
 ) -> dict[str, Any]:
+    control.check()
     emit(json.dumps({"event": "debug_rerun_start", "candidate_id": candidate_id}, ensure_ascii=False))
-    plan = load_plan(run_dir / "plan.json")
-    plan_doc = plan_to_dict(plan)
-    metadata = copy.deepcopy(plan.metadata)
-    candidates = {c["id"]: c for c in plan_doc.get("candidates", []) if isinstance(c, dict) and c.get("id")}
-    candidate = find_candidate(plan_doc, candidate_id)
+    _, metadata, candidates, candidate = load_debug_context(run_dir, candidate_id)
     rows = [row for row in trial_rows(run_dir) if row.get("candidate_id") == candidate_id]
     if concurrency is None:
         concurrency = default_debug_concurrency(metadata, candidates, candidate, rows)
@@ -1107,42 +1357,20 @@ def debug_rerun_worker(
         raise ValueError("mode must be closed-loop or open-loop")
     if run_class not in {"smoke", "concurrency", "tuning", "final_repeat", "open_loop", "diagnostic", "formal"}:
         raise ValueError("invalid run_class")
-    metadata["candidates"] = candidates
-    metadata["benchmark_dir"] = str(AUTOMATION_ROOT / "benchmarks")
-    metadata["debug_current_bundle_fingerprint"] = _bundle_fingerprint()
-    task_id = "debug-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-    task = PlanTask(
-        id=task_id,
-        stage=3,
-        candidate_id=candidate_id,
-        run_class=run_class,
-        mode=mode,
-        concurrency=max(1, int(concurrency)),
+    result = run_debug_attempt(
+        emit,
+        control,
+        run_dir,
+        metadata,
+        candidate,
+        candidate_id,
+        max(1, int(concurrency)),
+        run_class,
+        mode,
         scale=scale,
-        candidate_hash=str(candidate.get("config_hash") or ""),
+        task_prefix="debug",
     )
-    debug_root = run_dir / "debug-trials" / candidate_id
-    adapter = ReplayAdapter(metadata, debug_root)
-    emit(json.dumps({"event": "debug_trial", "task": task.id, "attempt": 1, "run_class": run_class, "concurrency": task.concurrency}, ensure_ascii=False))
-    attempt_dir = Path(adapter(task, 1))
-    result = read_attempt(attempt_dir, task, metadata)
-    result.update({
-        "task_id": task.id,
-        "candidate_id": candidate_id,
-        "concurrency": task.concurrency,
-        "mode": mode,
-        "scale": scale,
-        "run_class": run_class,
-        "attempt": 1,
-        "candidate_hash": task.candidate_hash,
-        "debug": True,
-        "result_path": str(attempt_dir),
-        "manifest": str((attempt_dir / "trial.json").relative_to(run_dir)),
-        "current_bundle_fingerprint": metadata["debug_current_bundle_fingerprint"],
-    })
-    write_json_atomic(attempt_dir / "trial.json", result)
-    append_debug_row(run_dir, result)
-    emit(json.dumps({"event": "debug_rerun_done", "status": result.get("status"), "result_path": str(attempt_dir)}, ensure_ascii=False))
+    emit(json.dumps({"event": "debug_rerun_done", "status": result.get("status"), "result_path": result.get("result_path")}, ensure_ascii=False))
     return result
 
 
@@ -1169,6 +1397,101 @@ def start_debug_rerun(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
         body.get("run_class"),
         body.get("mode"),
         scale,
+        target_run=run_dir,
+    )
+
+
+def debug_search_worker(
+    emit,
+    control: JobControl,
+    run_dir: Path,
+    candidate_id: str,
+) -> dict[str, Any]:
+    control.check()
+    emit(json.dumps({"event": "debug_search_start", "candidate_id": candidate_id}, ensure_ascii=False))
+    _, metadata, candidates, candidate = load_debug_context(run_dir, candidate_id)
+    search = metadata.get("search", {}) if isinstance(metadata.get("search"), dict) else {}
+    try:
+        concurrency_max = int(search.get("concurrency_max") or metadata.get("expected_request_count") or 64)
+    except (TypeError, ValueError):
+        concurrency_max = 64
+    try:
+        expected = int(metadata.get("expected_request_count") or concurrency_max)
+    except (TypeError, ValueError):
+        expected = concurrency_max
+    concurrency_max = max(1, min(concurrency_max, max(1, expected)))
+    start_concurrency = _start_concurrency(search, candidates, concurrency_max)
+    results: list[dict[str, Any]] = []
+    stop_reason = "concurrency_max"
+    best_score: float | None = None
+    concurrency = start_concurrency
+    max_points = 8
+
+    while concurrency <= concurrency_max and len(results) < max_points:
+        control.check()
+        result = run_debug_attempt(
+            emit,
+            control,
+            run_dir,
+            metadata,
+            candidate,
+            candidate_id,
+            concurrency,
+            "concurrency",
+            "closed-loop",
+            scale=None,
+            task_prefix="debug-search",
+        )
+        score = result_score(result)
+        results.append(result)
+        if score is None:
+            stop_reason = "failed_load_stop"
+            break
+        if best_score is not None and score <= best_score * 1.01:
+            stop_reason = "throughput_plateau"
+            break
+        best_score = max(best_score or score, score)
+        if concurrency == concurrency_max:
+            stop_reason = "concurrency_max"
+            break
+        concurrency = min(concurrency * 2, concurrency_max)
+
+    if len(results) >= max_points and concurrency < concurrency_max:
+        stop_reason = "debug_point_limit"
+    best = max((row for row in results if result_score(row) is not None), key=lambda row: result_score(row), default=None)
+    summary = {
+        "status": "PASS" if best else "INCONCLUSIVE",
+        "candidate_id": candidate_id,
+        "start_concurrency": start_concurrency,
+        "concurrency_max": concurrency_max,
+        "stop_reason": stop_reason,
+        "best_task_id": best.get("task_id") if isinstance(best, dict) else None,
+        "best_concurrency": best.get("concurrency") if isinstance(best, dict) else None,
+        "best_output_tokens_per_second": best.get("output_tokens_per_second") if isinstance(best, dict) else None,
+        "results": [
+            {
+                "task_id": row.get("task_id"),
+                "status": row.get("status"),
+                "concurrency": row.get("concurrency"),
+                "output_tokens_per_second": row.get("output_tokens_per_second"),
+                "result_path": row.get("result_path"),
+            }
+            for row in results
+        ],
+    }
+    emit(json.dumps({"event": "debug_search_done", **summary}, ensure_ascii=False))
+    return summary
+
+
+def start_debug_search(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = body.get("candidate_id")
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise ValueError("candidate_id is required")
+    return JOBS.create_function(
+        "debug-search",
+        debug_search_worker,
+        run_dir,
+        candidate_id,
         target_run=run_dir,
     )
 
@@ -1307,6 +1630,8 @@ class AutomationHandler(BaseHTTPRequestHandler):
                 return self.send_json(adopt_current_runtime(run_dir, str(body.get("note") or "")))
             if parts[2:] == ["debug-rerun"]:
                 return self.send_json(start_debug_rerun(run_dir, body), HTTPStatus.ACCEPTED)
+            if parts[2:] == ["debug-search"]:
+                return self.send_json(start_debug_search(run_dir, body), HTTPStatus.ACCEPTED)
             if parts[2:] == ["repair-trial"]:
                 return self.send_json(start_official_repair(run_dir, body), HTTPStatus.ACCEPTED)
         self.send_error_json(HTTPStatus.NOT_FOUND, "unknown endpoint")

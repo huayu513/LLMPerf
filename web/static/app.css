@@ -367,12 +367,14 @@ tr.clickable:hover {
 
 .artifact-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
   gap: 12px;
+  align-items: start;
   min-height: 520px;
 }
 
-.artifact-list {
+#artifact-list {
+  max-height: min(68vh, 760px);
   overflow: auto;
 }
 
@@ -382,9 +384,32 @@ tr.clickable:hover {
 
 .artifact-toolbar {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+  min-width: 0;
+}
+
+#artifact-title,
+#artifact-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#artifact-content {
+  max-height: min(68vh, 760px);
+}
+
+.artifact-item .title-line {
+  align-items: flex-start;
+}
+
+.artifact-item strong {
+  min-width: 0;
+  word-break: break-all;
 }
 
 pre {

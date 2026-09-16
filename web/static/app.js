@@ -257,16 +257,19 @@ function renderRuns() {
   });
 }
 
-async function selectRun(runId) {
+async function selectRun(runId, options) {
+  var opts = options || {};
   state.selectedRunId = runId;
   state.runDetail = await api(runPath(""));
   var candidates = await api(runPath("/candidates"));
   var trials = await api(runPath("/trials"));
   state.candidates = candidates.candidates || [];
   state.trials = trials.rows || [];
-  state.artifacts = [];
-  state.currentArtifactPath = null;
-  state.selectedTrial = null;
+  if (!opts.preserveArtifacts) {
+    state.artifacts = [];
+    state.currentArtifactPath = null;
+    state.selectedTrial = null;
+  }
   renderRuns();
   renderSummary();
   renderCandidates();
@@ -456,6 +459,7 @@ function renderArtifacts() {
   var box = el("artifact-list");
   el("artifact-path").textContent = state.currentArtifactPath || "";
   el("reload-artifact").disabled = !state.currentArtifactPath;
+  el("close-artifact").disabled = !state.currentArtifactPath;
   if (!state.artifacts.length) {
     box.className = "list empty";
     box.textContent = "暂无 artifact。";
@@ -485,6 +489,13 @@ function updateRepairButton() {
   var enabled = !!(row && !row.debug && (row.task_id || row.id || row.manifest));
   button.disabled = !enabled;
   button.title = enabled ? "追加官方 attempt 并重跑这条 trial" : "先在 Trials 里双击选择一条官方 trial";
+}
+
+function closeArtifact() {
+  state.currentArtifactPath = null;
+  el("artifact-path").textContent = "";
+  el("artifact-content").textContent = "未选择文件。";
+  renderArtifacts();
 }
 
 async function loadArtifact(path) {
@@ -530,7 +541,11 @@ function renderJobs() {
   state.jobs.forEach(function(job) {
     html += '<div class="job-item ' + (job.id === state.selectedJobId ? "active" : "") + '" data-job="' + escapeHtml(job.id) + '">';
     html += '<div class="title-line"><strong>' + escapeHtml(job.name) + " · " + escapeHtml(job.id) + "</strong>" + badge(job.status) + "</div>";
-    html += '<div class="small">' + escapeHtml(job.started_at || "") + (job.returncode !== null ? " · exit " + job.returncode : "") + "</div>";
+    var meta = escapeHtml(job.started_at || "") + " · " + escapeHtml(job.kind || "job");
+    if (job.stop_requested) meta += " · stopping";
+    if (job.active_container) meta += " · " + escapeHtml(job.active_container);
+    if (job.returncode !== null) meta += " · exit " + escapeHtml(job.returncode);
+    html += '<div class="small">' + meta + "</div>";
     if (job.error) html += '<div class="small">' + escapeHtml(job.error) + "</div>";
     html += "</div>";
   });
@@ -545,7 +560,7 @@ async function selectJob(jobId, fetchFresh) {
   state.selectedJobId = jobId;
   var job = fetchFresh === false ? state.jobs.find(function(item) { return item.id === jobId; }) : await api("/api/jobs/" + encodeURIComponent(jobId));
   if (!job) return;
-  el("stop-job").disabled = job.status !== "running" || job.kind !== "subprocess";
+  el("stop-job").disabled = job.status !== "running" || !!job.stop_requested;
   var header = "$ " + ((job.argv && job.argv.join(" ")) || job.name);
   var body = (job.lines || []).join("\n");
   if (job.result) body += "\n\n[result]\n" + JSON.stringify(job.result, null, 2);
@@ -606,6 +621,15 @@ async function debugRerun() {
   closeDrawer();
 }
 
+async function debugSearch() {
+  var detail = state.candidateDetail;
+  if (!detail) return;
+  await createJob(runPath("/debug-search"), {
+    candidate_id: detail.candidate.id
+  });
+  closeDrawer();
+}
+
 async function repairSelectedTrial() {
   var row = state.selectedTrial;
   if (!row || row.debug) return;
@@ -628,6 +652,7 @@ function bindEvents() {
   el("close-drawer").addEventListener("click", closeDrawer);
   el("show-candidate-artifacts").addEventListener("click", showCandidateArtifacts);
   el("debug-rerun").addEventListener("click", function() { debugRerun().catch(showError); });
+  el("debug-search").addEventListener("click", function() { debugSearch().catch(showError); });
   el("candidate-filter").addEventListener("input", renderCandidates);
   el("trial-filter").addEventListener("input", renderTrials);
   el("candidate-sort").addEventListener("change", renderCandidates);
@@ -635,6 +660,7 @@ function bindEvents() {
   el("repair-trial").addEventListener("click", function() { repairSelectedTrial().catch(showError); });
   el("refresh-jobs").addEventListener("click", function() { loadJobs().catch(showError); });
   el("stop-job").addEventListener("click", function() { stopSelectedJob().catch(showError); });
+  el("close-artifact").addEventListener("click", closeArtifact);
   el("reload-artifact").addEventListener("click", function() { loadArtifact(state.currentArtifactPath).catch(showError); });
   document.querySelectorAll(".tab").forEach(function(tab) {
     tab.addEventListener("click", function() { setActiveTab(tab.dataset.tab); });
@@ -651,7 +677,7 @@ async function refreshLoop() {
     await loadJobs();
     if (state.selectedRunId) {
       var anyRunning = state.jobs.some(function(job) { return job.status === "running"; });
-      if (anyRunning) await selectRun(state.selectedRunId);
+      if (anyRunning) await selectRun(state.selectedRunId, { preserveArtifacts: true });
     }
   } catch (error) {
     console.warn(error);
