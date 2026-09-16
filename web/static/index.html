@@ -110,7 +110,10 @@
             <div class="artifact-view">
               <div class="artifact-toolbar">
                 <span id="artifact-path" class="muted"></span>
-                <button id="reload-artifact" disabled>刷新</button>
+                <div class="button-row compact">
+                  <button id="close-artifact" disabled>关闭日志</button>
+                  <button id="reload-artifact" disabled>刷新</button>
+                </div>
               </div>
               <pre id="artifact-content">未选择文件。</pre>
             </div>
@@ -139,7 +142,8 @@
         </div>
         <div id="candidate-detail" class="detail-grid"></div>
         <div class="button-row">
-          <button id="debug-rerun">单独重跑这个参数</button>
+          <button id="debug-rerun">单点重跑</button>
+          <button id="debug-search">按搜索策略重跑</button>
           <button id="show-candidate-artifacts">查看日志</button>
         </div>
       </div>

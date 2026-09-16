@@ -31,6 +31,7 @@ from \`Automation/web/static\`. The default result root is
 - \`POST /api/runs/{run_id}/collect?result_root=...\`
 - \`POST /api/runs/{run_id}/adopt-runtime?result_root=...\`
 - \`POST /api/runs/{run_id}/debug-rerun?result_root=...\`
+- \`POST /api/runs/{run_id}/debug-search?result_root=...\`
 - \`POST /api/runs/{run_id}/repair-trial?result_root=...\`
 
 \`adopt-runtime\` updates \`plan.json.metadata.bundle_fingerprint\` and
@@ -42,6 +43,10 @@ runtime.
 \`debug-rerun\` reuses one candidate from the saved \`plan.json\`, runs it with
 the current Automation code, and records output under \`debug-trials/\` so the
 official search state and \`best.json\` remain unchanged.
+
+\`debug-search\` runs one candidate through the current debug search flow:
+start at the configured/default concurrency, double while output throughput
+improves by more than 1%, and store each point under \`debug-trials/\`.
 
 \`repair-trial\` reuses one official trial's original task parameters, appends
 the next \`attempt-N\` under \`trials/\`, updates \`search-state.json\`, and
