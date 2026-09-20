@@ -36,7 +36,7 @@ python3 benchctl.py auto --config configs/experiment.json
 1. 读取 checkpoint 中的 `config.json` 等元数据，识别已适配的 Qwen、GLM MoE、DeepSeek 模型及量化信息。模型目录可以任意命名；共用架构名称的变体结合静态聊天模板识别。未适配或证据不足时给出具体原因及同文件覆盖方式，不执行模型目录里的 Python 代码进行识别。
 2. 验证原始 JSONL，统计请求、读取请求使用的服务名称并计算 SHA-256。单次实验要求一个 `request.model` 名称，服务端使用这个名称；请求对象原样回放。
 3. 探测 GPU 数量、型号、显存、拓扑及镜像内的 SGLang 选项、parser、后端列表。按同型号/算力/显存的 GPU 分组生成部署拓扑和 TP/DP/PP 候选，过滤注意力头数等静态不兼容组合。若选择 2 张卡，会真实比较 `2卡1实例` 与 `2卡2实例`；若选择 8 张卡，会比较 `8卡1/2/4/8实例`。MIG 暂不支持。
-4. 默认不做单独 smoke。探索阶段直接启动候选服务并跑有用的小样本请求集，自动起始并发按所选 GPU 数估算，例如 2 卡默认从 16 开始；之后轮流增加并发，吞吐增长不足或请求失败时停止该分支，在最佳并发附近细查，并测试内存比例和 prefill 大小的少量邻近设置。
+4. 默认不做单独 smoke。探索阶段直接启动候选服务并跑有用的小样本请求集，自动起始并发按所选 GPU 数估算，例如 2 卡默认从 16 开始；之后每次增加 16 个并发，吞吐增长不足或请求失败时停止该分支，并测试内存比例和 prefill 大小的少量邻近设置。
 5. 探索层和全量层都不使用固定 topK：所有与当前 top1 输出 tokens/s 差距在 `promotion_tolerance` 内的候选点都会晋级或复跑。最终层使用完整请求集独立重复验证，按输出 tokens/s 中位数选赢家。只有请求成功、服务端 completion usage 可用、输入摘要一致且实际服务参数可核验的结果才参与排名。
 
 每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。
@@ -84,7 +84,7 @@ python3 benchctl.py auto --config configs/experiment.json
 | `gpu_indexes` | 使用检测到的物理 GPU，按同型号等条件分组测试 |
 | `smoke` | 默认 `false`，不单独启动服务做冒烟；设为 `true` 时每个候选先跑一次 8 条以内的冒烟 |
 | `search.concurrency_max` | 最大并发 64，实际不超过请求数量 |
-| `search.start_concurrency` | 默认自动估算：`min(concurrency_max, max(8, 8 * 所选GPU数))`；可显式指定 |
+| `search.start_concurrency` | 默认自动估算：`min(concurrency_max, max(8, 8 * 所选GPU数))`；可显式指定；后续探索并发每次增加 16 |
 | `search.explore_request_limit` | 探索和调参阶段默认最多回放 256 条；设为 0 表示探索阶段也使用完整请求集 |
 | `search.promotion_tolerance` | 默认 0.05；与 top1 吞吐差距 5% 以内的候选点都会进入最终全量复跑 |
 | `search.max_trials` | 最多 64 个试验点，包含失败点和最终重复验证；启用 `smoke` 时也包含冒烟 |
