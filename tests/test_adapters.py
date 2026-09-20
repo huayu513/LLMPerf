@@ -7,10 +7,14 @@ from s1slow.Automation.automation.types import PlanTask
 from s1slow.Automation.automation.docker_runtime import DockerRunResult
 
 class FakeRuntime:
-    def __init__(self): self.specs=[]
+    def __init__(self, server_command=False):
+        self.specs=[]
+        self.server_command=server_command
     def run(self, spec, log):
         self.specs.append(spec)
         Path(log).write_text("ok")
+        if self.server_command:
+            (Path(log).parent / "server.command.sh").write_text("echo server\n", encoding="utf-8")
         return DockerRunResult(0, "", "", {}, spec.name, spec.command)
 
 class AdapterTests(unittest.TestCase):
@@ -21,6 +25,25 @@ class AdapterTests(unittest.TestCase):
             adapter=ReplayAdapter(metadata, root/"run", runtime); task=PlanTask("t",0,"c",run_class="smoke")
             result=adapter(task,1); self.assertTrue(Path(result).is_dir()); self.assertEqual(len(runtime.specs),1); self.assertIn("Docker", runtime.specs[0].__class__.__name__)
             self.assertEqual(runtime.specs[0].gpu_indexes,(0,)); self.assertIn("/opt/s1slow/benchmarks/run_point.sh", runtime.specs[0].command)
+
+    def test_execute_writes_host_server_reproduce_script(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); model=root/"model"; model.mkdir(); src=root/"input.jsonl"; src.write_text("{}\n"); idx=root/"index.json"; idx.write_text("{}")
+            runtime=FakeRuntime(server_command=True)
+            metadata={"image":"x/y@sha256:"+"a"*64,"model_host":str(model),"jsonl_host":str(src),"index_host":str(idx),"benchmark_dir":str(root),"candidates":{"c":{"gpu_indexes":[6]}}}
+            adapter=ReplayAdapter(metadata, root/"run", runtime); task=PlanTask("t",0,"c",run_class="smoke")
+            result=Path(adapter(task,1))
+            script=result/"server.reproduce.sh"
+            self.assertTrue(script.is_file())
+            self.assertTrue(script.stat().st_mode & 0o111)
+            content=script.read_text(encoding="utf-8")
+            self.assertIn("docker run --rm --name", content)
+            self.assertIn("--gpus device=6", content)
+            self.assertIn("--publish 127.0.0.1:25080:25080", content)
+            self.assertIn("bash /run/results/server.reproduce.container.sh", content)
+            self.assertIn(f"type=bind,src={result.resolve()},dst=/run/results", content)
+            helper=(result/"server.reproduce.container.sh").read_text(encoding="utf-8")
+            self.assertIn("done < /run/results/server.command.sh", helper)
 
     def test_default_profile_is_portable_auto_profile(self):
         with tempfile.TemporaryDirectory() as td:
