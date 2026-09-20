@@ -46,7 +46,7 @@ class RuntimeShellContractTests(unittest.TestCase):
             self.assertNotEqual(replay_line.split()[1], "python3")
             self.assertTrue(Path(replay_line.split()[1]).is_absolute(), replay_line)
 
-    def test_auto_profile_uses_valid_empty_json_template(self):
+    def test_auto_profile_defaults_to_high_thinking_json_template(self):
         with tempfile.TemporaryDirectory() as td:
             env = dict(os.environ)
             env.update({"MODEL_PATH": td, "SGLANG_BIN": "/bin/echo"})
@@ -56,7 +56,12 @@ class RuntimeShellContractTests(unittest.TestCase):
                 cwd=ROOT, env=env, text=True, capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("--default-chat-template-kwargs \\{\\}", result.stdout)
+            self.assertIn(
+                '--default-chat-template-kwargs \\{\\"enable_thinking\\":true\\,'
+                '\\"reasoning_effort\\":\\"high\\"\\,'
+                '\\"thinking\\":true\\}',
+                result.stdout,
+            )
 
 
 if __name__ == "__main__":

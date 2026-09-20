@@ -22,6 +22,15 @@ _OVERRIDE_KEYS = {
     "is_moe", "tool_call_parser", "reasoning_parser", "chat_template_kwargs",
     "quantization", "profile_env",
 }
+
+# Automatic runs should measure the same reasoning mode for every candidate.
+# Keep this in the resolved model metadata so the setting reaches both the
+# server and any component that needs to render a chat template.
+_DEFAULT_CHAT_TEMPLATE_KWARGS = {
+    "enable_thinking": True,
+    "reasoning_effort": "high",
+    "thinking": True,
+}
 _QWEN2_TYPES = {"qwen", "qwen2", "qwen2_moe"}
 _QWEN3_TYPES = {
     "qwen3", "qwen3_moe", "qwen3_next", "qwen3_5", "qwen3_5_text",
@@ -392,13 +401,19 @@ def discover_model(
         else "architecture mapping"
     )
 
-    chat_template_kwargs = _mapping(
-        override.get("chat_template_kwargs", {}), "chat_template_kwargs"
-    )
+    if "chat_template_kwargs" in override:
+        # An explicit model override remains authoritative for model-specific
+        # templates, while the ordinary automatic path gets high thinking by
+        # default.  The captured requests themselves are never rewritten.
+        chat_template_kwargs = _mapping(
+            override["chat_template_kwargs"], "chat_template_kwargs"
+        )
+    else:
+        chat_template_kwargs = dict(_DEFAULT_CHAT_TEMPLATE_KWARGS)
     provenance["chat_template_kwargs"] = (
         "model_overrides.chat_template_kwargs"
         if "chat_template_kwargs" in override
-        else "safe empty default"
+        else "automatic high-thinking default"
     )
     profile_env = _mapping(override.get("profile_env", {}), "profile_env")
     if any(not isinstance(value, str) for value in profile_env.values()):

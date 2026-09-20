@@ -34,6 +34,37 @@ class AdapterTests(unittest.TestCase):
             }, root / "run")
             spec = adapter.build_spec(PlanTask("t", 0, "c", run_class="smoke"), 1)
             self.assertEqual(spec.command[4], "AUTO")
+            self.assertEqual(json.loads(spec.env["DEFAULT_CHAT_TEMPLATE_KWARGS"]), {
+                "enable_thinking": True,
+                "reasoning_effort": "high",
+                "thinking": True,
+            })
+            legacy_metadata = {
+                "image": "x/y@sha256:" + "a" * 64,
+                "model_host": str(model), "jsonl_host": str(source),
+                "index_host": str(index), "benchmark_dir": str(root),
+                "chat_template_kwargs": {},
+                "model_snapshot": {"raw": {"provenance": {
+                    "chat_template_kwargs": "safe empty default",
+                }}},
+            }
+            legacy_spec = ReplayAdapter(
+                legacy_metadata, root / "legacy-run"
+            ).build_spec(PlanTask("t", 0, "c", run_class="smoke"), 1)
+            self.assertEqual(
+                json.loads(legacy_spec.env["DEFAULT_CHAT_TEMPLATE_KWARGS"]),
+                json.loads(spec.env["DEFAULT_CHAT_TEMPLATE_KWARGS"]),
+            )
+            explicit_empty = dict(legacy_metadata)
+            explicit_empty["model_snapshot"] = {
+                "raw": {"provenance": {
+                    "chat_template_kwargs": "model_overrides.chat_template_kwargs",
+                }}
+            }
+            explicit_spec = ReplayAdapter(
+                explicit_empty, root / "explicit-run"
+            ).build_spec(PlanTask("t", 0, "c", run_class="smoke"), 1)
+            self.assertEqual(explicit_spec.env["DEFAULT_CHAT_TEMPLATE_KWARGS"], "{}")
 
     def test_non_controller_stage_uses_formal_run_class(self):
         with tempfile.TemporaryDirectory() as td:
@@ -264,6 +295,7 @@ class AdapterTests(unittest.TestCase):
                 })
                 self.assertEqual(result["status"], status)
                 self.assertIn(reason, result["reasons"])
+                self.assertEqual(result["failure_phase"], "startup")
 
     def test_read_attempt_requires_positive_finite_measurement(self):
         with tempfile.TemporaryDirectory() as td:
@@ -283,6 +315,36 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(result["status"], "INCONCLUSIVE")
             self.assertIn("measured_seconds_invalid", result["reasons"])
             self.assertIn("output_tokens_per_second_invalid", result["reasons"])
+            self.assertEqual(result["failure_phase"], "startup")
+
+    def test_read_attempt_marks_request_failure_as_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            attempt = Path(td)
+            summary = {
+                "jsonl_sha256": "r" * 64, "request_count": 1,
+                "successes": 0, "failures": 1, "server_usage_available": 0,
+                "server_usage_missing": 0, "completion_tokens": 1,
+                "measured_seconds": 1.0, "output_tokens_per_second": 1.0,
+                "base_url": "http://127.0.0.1:25080",
+            }
+            (attempt / "x.summary.json").write_text(json.dumps(summary))
+            requested = {"model_path": "/model", "max_running_requests": 1}
+            (attempt / "server.requested.json").write_text(json.dumps(requested))
+            (attempt / "server.info.json").write_text(json.dumps(requested))
+            (attempt / "server.evidence.json").write_text(json.dumps({
+                "readiness": True, "server_info_captured": True, "resolved": True,
+                "requested_server_parameters": requested,
+                "unsupported_parameters": [], "mismatched_parameters": [],
+            }))
+            (attempt / "run_manifest.json").write_text(json.dumps({
+                "state": "complete", "exit_code": 0,
+            }))
+            result = read_attempt(attempt, PlanTask("t", 0, "c", run_class="formal"), {
+                "expected_source_sha256": "r" * 64, "expected_request_count": 1,
+            })
+            self.assertEqual(result["status"], "INCONCLUSIVE")
+            self.assertIn("request_failures", result["reasons"])
+            self.assertEqual(result["failure_phase"], "replay")
 
     def test_read_attempt_failed_exit_is_failed_even_without_artifacts(self):
         with tempfile.TemporaryDirectory() as td:

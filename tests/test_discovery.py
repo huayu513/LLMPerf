@@ -68,7 +68,11 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(first.reasoning_parser, "qwen3")
         self.assertEqual(second.tool_call_parser, first.tool_call_parser)
         self.assertEqual(second.reasoning_parser, first.reasoning_parser)
-        self.assertEqual(first.chat_template_kwargs, {})
+        self.assertEqual(first.chat_template_kwargs, {
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+            "thinking": True,
+        })
         self.assertEqual(first.raw["model_type"], "qwen3")
         self.assertEqual(first.raw["num_attention_heads"], 32)
         self.assertEqual(first.raw["num_hidden_layers"], 48)

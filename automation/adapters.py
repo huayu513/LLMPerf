@@ -13,6 +13,36 @@ from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .types import DockerConfig, PlanTask
 
 
+_DEFAULT_CHAT_TEMPLATE_KWARGS = {
+    "enable_thinking": True,
+    "reasoning_effort": "high",
+    "thinking": True,
+}
+
+
+def _chat_template_provenance(metadata: Mapping[str, Any]) -> Any:
+    snapshot = metadata.get("model_snapshot", {})
+    raw = snapshot.get("raw", {}) if isinstance(snapshot, Mapping) else {}
+    provenance = raw.get("provenance", {}) if isinstance(raw, Mapping) else {}
+    return provenance.get("chat_template_kwargs") if isinstance(provenance, Mapping) else None
+
+
+def _effective_chat_template_kwargs(metadata: Mapping[str, Any]) -> Any:
+    """Return high-thinking defaults for plans written before that default.
+
+    An explicit model override, including an intentionally empty mapping,
+    remains authoritative.  Plans written by the old discovery path carry the
+    ``safe empty default`` provenance marker and are upgraded on replay.
+    """
+
+    if "chat_template_kwargs" not in metadata:
+        return dict(_DEFAULT_CHAT_TEMPLATE_KWARGS)
+    value = metadata["chat_template_kwargs"]
+    if value == {} and _chat_template_provenance(metadata) == "safe empty default":
+        return dict(_DEFAULT_CHAT_TEMPLATE_KWARGS)
+    return value
+
+
 def _candidate(metadata: Mapping[str, Any], task: PlanTask) -> Mapping[str, Any]:
     candidates = metadata.get("candidates", {})
     if not isinstance(candidates, Mapping):
@@ -237,6 +267,45 @@ def _summary_metric_fields() -> tuple[str, ...]:
     )
 
 
+_STARTUP_FAILURE_REASONS = frozenset({
+    "readiness_missing",
+    "server_evidence_missing",
+    "server_info_missing",
+    "server_parameter_artifacts_missing",
+    "unsupported_server_parameters",
+    "server_parameter_mismatch",
+    "requested_server_parameters_mismatch",
+    "server_evidence_inconsistent",
+    "resolved_parameters_missing",
+})
+
+
+def _failure_phase(
+    status: str,
+    reasons: list[str],
+    summary: Mapping[str, Any] | None,
+    evidence: Mapping[str, Any] | None,
+) -> str | None:
+    """Classify failures before search applies backend quarantine.
+
+    A replay can fail after a healthy server has started (for example because
+    an individual request failed or the load caused an OOM).  Those failures
+    must stop only the current candidate branch.  Missing readiness/evidence
+    is the stronger signal that the requested server configuration itself did
+    not start, so only that phase is eligible to block a backend.
+    """
+
+    if status == "UNSUPPORTED" or any(reason in _STARTUP_FAILURE_REASONS for reason in reasons):
+        return "startup"
+    if summary is None and evidence is None:
+        return "startup"
+    if summary is None and evidence is not None and evidence.get("readiness") is not True:
+        return "startup"
+    if summary is not None:
+        return "replay"
+    return None
+
+
 def _local_loopback_url(value: Any, allowed_ports: set[int]) -> bool:
     try:
         address = urlsplit(value) if isinstance(value, str) else None
@@ -276,7 +345,7 @@ def _expected_requested_parameters(metadata: Mapping[str, Any], task: PlanTask) 
         if value not in (None, ""):
             expected[key] = value
     if "chat_template_kwargs" in metadata:
-        expected["chat_template_kwargs"] = metadata["chat_template_kwargs"]
+        expected["chat_template_kwargs"] = _effective_chat_template_kwargs(metadata)
     return expected
 
 
@@ -370,7 +439,7 @@ class ReplayAdapter:
             value = self._value(source)
             if value is not None:
                 env[target] = str(value)
-        template_kwargs = self._value("chat_template_kwargs", default={})
+        template_kwargs = _effective_chat_template_kwargs(self.metadata)
         if not isinstance(template_kwargs, Mapping):
             raise ValueError("chat_template_kwargs must be an object")
         env["DEFAULT_CHAT_TEMPLATE_KWARGS"] = json.dumps(
@@ -635,6 +704,10 @@ def read_attempt(
         result["status"] = "FAILED"
     elif not result["reasons"]:
         result["status"] = "VALID"
+    if result["status"] != "VALID":
+        phase = _failure_phase(result["status"], result["reasons"], summary, evidence)
+        if phase is not None:
+            result["failure_phase"] = phase
     return result
 
 

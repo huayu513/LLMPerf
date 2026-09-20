@@ -34,7 +34,11 @@ AUTOMATION_ROOT = Path(__file__).resolve().parents[1]
 if str(AUTOMATION_ROOT) not in sys.path:
     sys.path.insert(0, str(AUTOMATION_ROOT))
 
-from automation.adapters import ReplayAdapter, read_attempt  # noqa: E402
+from automation.adapters import (  # noqa: E402
+    ReplayAdapter,
+    _effective_chat_template_kwargs,
+    read_attempt,
+)
 from automation.artifacts import write_json_atomic  # noqa: E402
 from automation.docker_runtime import DockerRuntime  # noqa: E402
 from automation.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
@@ -202,6 +206,13 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
     raw_candidates = plan.get("candidates", []) if isinstance(plan, dict) else []
     rows_doc = json_load(run_dir / "results-index.json", {})
     rows = rows_doc.get("rows", []) if isinstance(rows_doc, dict) else []
+    state_doc = json_load(run_dir / "search-state.json", {})
+    candidate_states = (
+        state_doc.get("candidate_states", {})
+        if isinstance(state_doc, dict) else {}
+    )
+    if not isinstance(candidate_states, dict):
+        candidate_states = {}
     by_candidate: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         if isinstance(row, dict) and row.get("candidate_id"):
@@ -216,6 +227,17 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
         valid = [r for r in attempts if r.get("status") == "VALID" and isinstance(r.get("output_tokens_per_second"), (int, float))]
         latest = max(attempts, key=lambda r: str(r.get("manifest", "")), default=None)
         best = max(valid, key=lambda r: float(r.get("output_tokens_per_second", 0)), default=None)
+        state = candidate_states.get(str(candidate.get("id")), {})
+        if not isinstance(state, dict):
+            state = {}
+        state_status = state.get("status")
+        state_reasons = state.get("reasons", [])
+        if state_status:
+            latest_status = state_status
+            latest_reasons = state_reasons
+        else:
+            latest_status = latest.get("status") if isinstance(latest, dict) else "NOT_RUN"
+            latest_reasons = latest.get("reasons") if isinstance(latest, dict) else []
         result.append({
             "id": candidate.get("id"),
             "plan_order": plan_order,
@@ -234,8 +256,9 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
             "max_running_requests": static.get("max_running_requests"),
             "chunked_prefill_size": static.get("chunked_prefill_size"),
             "attempt_count": len(attempts),
-            "latest_status": latest.get("status") if isinstance(latest, dict) else "NOT_RUN",
-            "latest_reasons": latest.get("reasons") if isinstance(latest, dict) else [],
+            "latest_status": latest_status,
+            "latest_reasons": latest_reasons,
+            "candidate_state": state,
             "best_output_tokens_per_second": best.get("output_tokens_per_second") if isinstance(best, dict) else None,
             "best_concurrency": best.get("concurrency") if isinstance(best, dict) else None,
         })
@@ -407,9 +430,10 @@ def preview_launch(metadata: dict[str, Any], candidate: dict[str, Any], concurre
     if is_moe:
         params["backend"] = static.get("backend") or "auto"
         params["moe_a2a_backend"] = static.get("moe_a2a_backend") or "auto"
-    for key in ("tool_call_parser", "reasoning_parser", "quantization", "chat_template_kwargs"):
+    for key in ("tool_call_parser", "reasoning_parser", "quantization"):
         if metadata.get(key) not in (None, ""):
             params[key] = metadata.get(key)
+    params["chat_template_kwargs"] = _effective_chat_template_kwargs(metadata)
     flags = [
         "sglang", "serve",
         "--trust-remote-code",
