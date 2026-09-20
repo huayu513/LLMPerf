@@ -4,6 +4,15 @@ from typing import Optional
 from pathlib import Path
 from typing import Any
 
+
+def _default_chat_template_kwargs() -> Dict[str, Any]:
+    return {
+        "enable_thinking": True,
+        "reasoning_effort": "high",
+        "thinking": True,
+    }
+
+
 @dataclass(frozen=True)
 class PathConfig:
     model_host: Path
@@ -32,7 +41,7 @@ class ModelManifest:
     tokenizer: Optional[str] = None
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
-    chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
+    chat_template_kwargs: Dict[str, Any] = field(default_factory=_default_chat_template_kwargs)
     quantization: Optional[str] = None
     moe_backend: Optional[str] = None
     backend: Optional[str] = None

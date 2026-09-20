@@ -41,7 +41,9 @@ python3 benchctl.py auto --config configs/experiment.json
 
 每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。
 
-`thinking`、`reasoning_effort`、采样参数和输出长度不参与吞吐调优；沿用原始请求及模型/镜像的默认语义。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
+自动方案的服务设置默认开启 high thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=high`；只有显式的 `model_overrides.chat_template_kwargs` 会覆盖这个默认。原始请求对象仍原样回放，采样参数和输出长度不参与吞吐调优。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
+
+如果候选服务在启动阶段失败，当前 candidate 会记录为 `FAILED`；如果它使用了明确的 MoE runner backend，后续使用同一 backend 的候选会直接记录为 `SKIPPED`，不会再次启动容器。引擎自动选择的 `auto` 没有可确认的 backend，不会据此误跳过其他候选。回放阶段的请求失败或 OOM 只停止当前 candidate 的并发分支。失败候选和 backend 跳过原因会写入 `search-state.json`、`results-index.json` 和 `best.json`。需要复查时可在前端对单个 candidate 使用“单独重跑这个参数”，该入口不受自动搜索的 backend 跳过状态影响。
 
 输入沿用现有捕获格式，每行是一条请求，例如：
 

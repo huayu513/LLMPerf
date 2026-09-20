@@ -11,11 +11,15 @@ from s1slow.Automation.automation.planner import fingerprint, plan_to_dict
 
 def plan(max_trials=40, repetitions=3, candidates=1, smoke=False,
          start_concurrency=1, gpu_indexes=(0,), concurrency_max=16,
-         expected_request_count=None):
+         expected_request_count=None, backend_values=None):
     if expected_request_count is None:
         expected_request_count = max(20, concurrency_max)
+    backend_values = backend_values or [None] * candidates
     items = tuple(CandidateConfig('c' + str(i), gpu_indexes=gpu_indexes,
-                  static_config={'tp': 1, 'dp': 1, 'pp': 1}, config_hash='hash' + str(i))
+                  backend=backend_values[i],
+                  static_config={'tp': 1, 'dp': 1, 'pp': 1,
+                                 'backend': backend_values[i]},
+                  config_hash='hash' + str(i))
                   for i in range(candidates))
     return Plan('test', candidates=items, metadata={
         'expected_source_sha256': 'abc', 'expected_request_count': expected_request_count,
@@ -151,6 +155,77 @@ class SearchTests(unittest.TestCase):
         result = self.execute(plan(candidates=2, smoke=True), execute)
         self.assertEqual(result['best']['candidate_id'], 'c1')
         self.assertEqual([t.run_class for t in self.calls if t.candidate_id == 'c0'], ['smoke'])
+
+    def test_startup_failure_blocks_later_candidates_with_same_backend(self):
+        p = plan(candidates=3, backend_values=['triton', 'triton', 'flashinfer'])
+
+        def execute(task, attempt):
+            self.calls.append(task)
+            if task.candidate_id == 'c0':
+                return {
+                    'status': 'FAILED',
+                    'failure_phase': 'startup',
+                    'reasons': ['server_info_missing'],
+                }
+            return {
+                'status': 'VALID',
+                'output_tokens_per_second': task.concurrency * 10,
+            }
+
+        result = self.execute(p, execute)
+
+        self.assertEqual(result['backend_blocks']['triton']['candidate_id'], 'c0')
+        self.assertEqual(result['candidate_states']['c0']['status'], 'FAILED')
+        self.assertEqual(result['candidate_states']['c1']['status'], 'SKIPPED')
+        self.assertEqual(result['best']['candidate_id'], 'c2')
+        self.assertFalse(any(t.candidate_id == 'c1' for t in self.calls))
+        self.assertTrue(any(t.candidate_id == 'c2' for t in self.calls))
+        skipped_rows = [
+            row for row in json.loads(
+                (Path(self.directory.name) / 'results-index.json').read_text()
+            )['rows']
+            if row.get('candidate_id') == 'c1'
+        ]
+        self.assertTrue(skipped_rows)
+        self.assertEqual(skipped_rows[0]['status'], 'SKIPPED')
+
+    def test_replay_failure_does_not_block_backend(self):
+        p = plan(candidates=2, backend_values=['triton', 'triton'])
+
+        def execute(task, attempt):
+            self.calls.append(task)
+            if task.candidate_id == 'c0':
+                return {'status': 'FAILED', 'reasons': ['OOM']}
+            return {'status': 'VALID', 'output_tokens_per_second': 10}
+
+        result = self.execute(p, execute)
+
+        self.assertEqual(result['backend_blocks'], {})
+        self.assertEqual(result['candidate_states']['c1']['status'], 'VALID')
+        self.assertTrue(any(t.candidate_id == 'c1' for t in self.calls))
+
+    def test_backend_failure_does_not_skip_already_valid_candidate_repeats(self):
+        p = plan(candidates=2, backend_values=['triton', 'triton'])
+
+        def execute(task, attempt):
+            self.calls.append(task)
+            if task.candidate_id == 'c1':
+                return {
+                    'status': 'FAILED',
+                    'failure_phase': 'startup',
+                    'reasons': ['readiness_missing'],
+                }
+            return {'status': 'VALID', 'output_tokens_per_second': 10}
+
+        result = self.execute(p, execute)
+
+        self.assertEqual(result['status'], 'PASS')
+        self.assertEqual(result['best']['candidate_id'], 'c0')
+        c0_repeats = [t for t in self.calls if t.candidate_id == 'c0'
+                      and t.run_class == 'final_repeat']
+        self.assertGreaterEqual(len(c0_repeats), 3)
+        self.assertEqual(result['candidate_states']['c1']['status'], 'FAILED')
+        self.assertEqual(result['backend_blocks']['triton']['candidate_id'], 'c1')
 
     def test_requested_open_loop_failure_is_reported_separately(self):
         p = plan()
