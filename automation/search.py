@@ -581,6 +581,8 @@ def execute_search(plan, run_root, executor=None, resume=False):
                                 promoted_score=_score(promoted_result),
                                 server_command_paths=[r['server_command_path'] for r in repeats
                                                       if r.get('server_command_path')],
+                                server_reproduce_paths=[r['server_reproduce_path'] for r in repeats
+                                                        if r.get('server_reproduce_path')],
                                 measured_task_ids=[r['task_id'] for r in repeats])
                     if best is None or candidate_best['output_tokens_per_second'] > best['output_tokens_per_second']:
                         best = candidate_best
