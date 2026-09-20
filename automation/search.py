@@ -14,6 +14,13 @@ from .planner import fingerprint, plan_to_dict
 from .types import PlanTask
 
 
+_CONCURRENCY_STEP = 16
+
+
+def _next_concurrency(current, maximum):
+    return min(current + _CONCURRENCY_STEP, maximum)
+
+
 def _score(result):
     value = result.get('output_tokens_per_second')
     return (float(value) if result.get('status') == 'VALID' and type(value) in (int, float)
@@ -206,7 +213,8 @@ def execute_search(plan, run_root, executor=None, resume=False):
 
     measured = {}
     active = []
-    # Leave room for at least one doubling per screened candidate, plus repeats.
+    # Leave room for at least one additional concurrency point per screened
+    # candidate, plus repeats.
     screen_count = min(len(plan.candidates), max(1, explore_limit // 4))
     screening_trials = 0
     for candidate in plan.candidates:
@@ -228,8 +236,8 @@ def execute_search(plan, run_root, executor=None, resume=False):
         if baseline is not None and _score(baseline) is not None:
             measured[candidate.id] = {start_concurrency: baseline}
             active.append(candidate.id)
-    concurrency = min(start_concurrency * 2, concurrency_max)
-    while active and concurrency <= concurrency_max:
+    concurrency = _next_concurrency(start_concurrency, concurrency_max)
+    while active and start_concurrency < concurrency <= concurrency_max:
         next_active = []
         for ident in active:
             result = trial(ident, concurrency)
@@ -247,26 +255,13 @@ def execute_search(plan, run_root, executor=None, resume=False):
         active = next_active
         if concurrency == concurrency_max:
             break
-        concurrency = min(concurrency * 2, concurrency_max)
+        concurrency = _next_concurrency(concurrency, concurrency_max)
 
     def winner():
         valid = [r for points in measured.values() for r in points.values() if _score(r) is not None]
         return max(valid, key=_score) if valid else None
 
     provisional = winner()
-    if provisional:
-        ident, best_c = provisional['candidate_id'], provisional['concurrency']
-        # Refine the winning interval without crossing a failed load boundary.
-        failed = [d['concurrency'] for d in decisions if d.get('candidate') == ident
-                  and d.get('reason') == 'failed_load_stop']
-        ceiling = min(failed) - 1 if failed else concurrency_max
-        for point in sorted({max(1, best_c - 1), min(ceiling, best_c + 1)}):
-            if point in measured[ident] or point < 1:
-                continue
-            result = trial(ident, point)
-            if result is not None and _score(result) is not None:
-                measured[ident][point] = result
-        provisional = winner()
 
     # Small tuning neighborhood; each variation has its own candidate identity.
     if provisional:

@@ -45,7 +45,7 @@ the current Automation code, and records output under \`debug-trials/\` so the
 official search state and \`best.json\` remain unchanged.
 
 \`debug-search\` runs one candidate through the current debug search flow:
-start at the configured/default concurrency, double while output throughput
+start at the configured/default concurrency, add 16 while output throughput
 improves by more than 1%, and store each point under \`debug-trials/\`.
 
 \`repair-trial\` reuses one official trial's original task parameters, appends

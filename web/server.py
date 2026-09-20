@@ -38,7 +38,12 @@ from automation.adapters import ReplayAdapter, read_attempt  # noqa: E402
 from automation.artifacts import write_json_atomic  # noqa: E402
 from automation.docker_runtime import DockerRuntime  # noqa: E402
 from automation.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
-from automation.search import _candidate_gpu_count, _start_concurrency, collect_results  # noqa: E402
+from automation.search import (  # noqa: E402
+    _candidate_gpu_count,
+    _next_concurrency,
+    _start_concurrency,
+    collect_results,
+)
 from automation.types import PlanTask  # noqa: E402
 from automation.workflow import _bundle_fingerprint  # noqa: E402
 
@@ -1454,7 +1459,7 @@ def debug_search_worker(
         if concurrency == concurrency_max:
             stop_reason = "concurrency_max"
             break
-        concurrency = min(concurrency * 2, concurrency_max)
+        concurrency = _next_concurrency(concurrency, concurrency_max)
 
     if len(results) >= max_points and concurrency < concurrency_max:
         stop_reason = "debug_point_limit"

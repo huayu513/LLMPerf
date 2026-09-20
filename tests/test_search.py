@@ -10,14 +10,17 @@ from s1slow.Automation.automation.planner import fingerprint, plan_to_dict
 
 
 def plan(max_trials=40, repetitions=3, candidates=1, smoke=False,
-         start_concurrency=1, gpu_indexes=(0,)):
+         start_concurrency=1, gpu_indexes=(0,), concurrency_max=16,
+         expected_request_count=None):
+    if expected_request_count is None:
+        expected_request_count = max(20, concurrency_max)
     items = tuple(CandidateConfig('c' + str(i), gpu_indexes=gpu_indexes,
                   static_config={'tp': 1, 'dp': 1, 'pp': 1}, config_hash='hash' + str(i))
                   for i in range(candidates))
     return Plan('test', candidates=items, metadata={
-        'expected_source_sha256': 'abc', 'expected_request_count': 20,
+        'expected_source_sha256': 'abc', 'expected_request_count': expected_request_count,
         'smoke': smoke,
-        'search': {'concurrency_max': 16, 'max_trials': max_trials,
+        'search': {'concurrency_max': concurrency_max, 'max_trials': max_trials,
                    'start_concurrency': start_concurrency, 'explore_request_limit': 256,
                    'promotion_tolerance': 0.05, 'max_seconds': 10000,
                    'repetitions': repetitions, 'open_loop_scales': []},
@@ -40,14 +43,25 @@ class SearchTests(unittest.TestCase):
                 'candidate_id': task.candidate_id, 'concurrency': task.concurrency, 'reasons': []}
 
     def test_searches_past_one_and_repeats_measured_winner(self):
-        result = self.execute(plan(), self.executor)
+        p = plan(start_concurrency=16, concurrency_max=64, expected_request_count=64)
+
+        def execute(task, attempt):
+            self.calls.append(task)
+            score = {16: 10, 32: 18, 48: 25, 64: 23}[task.concurrency]
+            return {'status': 'VALID', 'output_tokens_per_second': score,
+                    'candidate_id': task.candidate_id, 'concurrency': task.concurrency,
+                    'reasons': []}
+
+        result = self.execute(p, execute)
         self.assertEqual(result['status'], 'PASS')
-        self.assertEqual(result['best']['concurrency'], 4)
+        self.assertEqual(result['best']['concurrency'], 48)
         self.assertEqual(result['best']['output_tokens_per_second'], 25)
+        explored = [t.concurrency for t in self.calls if t.run_class == 'concurrency']
+        self.assertEqual(explored, [16, 32, 48, 64])
         repeats = [t for t in self.calls if t.run_class == 'final_repeat']
-        self.assertEqual(len(repeats), 6)
-        self.assertEqual(sum(1 for t in repeats if t.concurrency == 4), 3)
-        self.assertEqual(sum(1 for t in repeats if t.concurrency == 3), 3)
+        self.assertEqual(len(repeats), 3)
+        self.assertEqual(sum(1 for t in repeats if t.concurrency == 48), 3)
+        self.assertFalse(any(t.concurrency in {47, 49} for t in self.calls))
         self.assertTrue((Path(self.directory.name) / 'best.json').is_file())
 
     def test_auto_start_concurrency_uses_selected_gpu_count(self):
@@ -67,7 +81,7 @@ class SearchTests(unittest.TestCase):
             return result
         result = self.execute(plan(), execute)
         best = result['best']
-        self.assertEqual(best['configuration']['static_config']['max_running_requests'], 4)
+        self.assertEqual(best['configuration']['static_config']['max_running_requests'], 16)
         self.assertEqual(best['configuration']['static_config']['backend'], 'resolved-runner')
         self.assertEqual(len(best['server_command_paths']), 3)
         self.assertTrue(all('final_repeat' in path for path in best['server_command_paths']))
@@ -84,16 +98,18 @@ class SearchTests(unittest.TestCase):
                       [d['reason'] for d in result['stop_reasons']])
 
     def test_oom_stops_increasing_concurrency(self):
+        p = plan(start_concurrency=16, concurrency_max=64, expected_request_count=64)
+
         def execute(task, attempt):
-            if task.concurrency >= 4:
+            if task.concurrency >= 48:
                 self.calls.append(task)
                 return {'status': 'FAILED', 'reasons': ['OOM']}
             return self.executor(task, attempt)
-        result = self.execute(plan(), execute)
+        result = self.execute(p, execute)
         self.assertEqual(result['status'], 'PASS')
-        self.assertEqual(result['best']['concurrency'], 3)
-        self.assertTrue(any(t.concurrency == 3 for t in self.calls))
-        self.assertFalse(any(t.concurrency > 4 for t in self.calls))
+        self.assertEqual(result['best']['concurrency'], 32)
+        self.assertTrue(any(t.concurrency == 32 for t in self.calls))
+        self.assertFalse(any(t.concurrency > 48 for t in self.calls))
 
     def test_budget_reserves_repeats_and_screens_multiple_candidates(self):
         result = self.execute(plan(max_trials=12, candidates=2, smoke=True), self.executor)

@@ -46,7 +46,7 @@ Interfaces: retain ReplayAdapter.build_spec(task, attempt, attempt_dir), __call_
 
 Files: automation/planner.py, automation/search.py, tests/test_search.py, planner tests.
 
-Interfaces: create_search_plan(config, model, workload, env, result_dir) -> Plan; execute_search(plan, run_root, executor=None, resume=False) -> dict. Executor callback(task, attempt) returns normalized dict. Search doubles concurrency until plateau/failure/bound, probes neighbors near best, screens candidates fairly before deeper search, reserves repeated full-workload validation; optional open-loop evidence is separate from closed-loop winner. Budget limits new trials and stops cleanly. Results and decisions persist; resumed runs validate input/plan identity and completed artifacts.
+Interfaces: create_search_plan(config, model, workload, env, result_dir) -> Plan; execute_search(plan, run_root, executor=None, resume=False) -> dict. Executor callback(task, attempt) returns normalized dict. Search increases concurrency by 16 until plateau/failure/bound, screens candidates fairly before deeper search, and reserves repeated full-workload validation; optional open-loop evidence is separate from closed-loop winner. Budget limits new trials and stops cleanly. Results and decisions persist; resumed runs validate input/plan identity and completed artifacts.
 
 - [x] Test GPU/model filtering, concurrency >1, plateau/OOM behavior, best measurement versus largest concurrency, repeats, no valid winner, resume and budget exhaustion with deterministic fake executors.
 - [x] Implement candidate generation using hardware/model facts, adaptive search and normalized reports.
