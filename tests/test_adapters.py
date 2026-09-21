@@ -7,14 +7,17 @@ from s1slow.Automation.automation.types import PlanTask
 from s1slow.Automation.automation.docker_runtime import DockerRunResult
 
 class FakeRuntime:
-    def __init__(self, server_command=False):
+    def __init__(self, server_command=False, server_command_subdir=""):
         self.specs=[]
         self.server_command=server_command
+        self.server_command_subdir=server_command_subdir
     def run(self, spec, log):
         self.specs.append(spec)
         Path(log).write_text("ok")
         if self.server_command:
-            (Path(log).parent / "server.command.sh").write_text("echo server\n", encoding="utf-8")
+            command_dir = Path(log).parent / self.server_command_subdir
+            command_dir.mkdir(parents=True, exist_ok=True)
+            (command_dir / "server.command.sh").write_text("echo server\n", encoding="utf-8")
         return DockerRunResult(0, "", "", {}, spec.name, spec.command)
 
 class AdapterTests(unittest.TestCase):
@@ -44,6 +47,37 @@ class AdapterTests(unittest.TestCase):
             self.assertIn(f"type=bind,src={result.resolve()},dst=/run/results", content)
             helper=(result/"server.reproduce.container.sh").read_text(encoding="utf-8")
             self.assertIn("done < /run/results/server.command.sh", helper)
+
+    def test_nested_server_command_gets_reproduce_script_next_to_artifact(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); model=root/"model"; model.mkdir(); src=root/"input.jsonl"; src.write_text("{}\n"); idx=root/"index.json"; idx.write_text("{}")
+            runtime=FakeRuntime(server_command=True, server_command_subdir="formal/AUTO/run_001")
+            metadata={"image":"x/y@sha256:"+"a"*64,"model_host":str(model),"jsonl_host":str(src),"index_host":str(idx),"benchmark_dir":str(root),"candidates":{"c":{"gpu_indexes":[0]}}}
+            adapter=ReplayAdapter(metadata, root/"run", runtime); task=PlanTask("t",0,"c",run_class="formal")
+            result=Path(adapter(task,1))
+            artifact=result/"formal/AUTO/run_001"
+            script=artifact/"server.reproduce.sh"
+            self.assertTrue(script.is_file())
+            content=script.read_text(encoding="utf-8")
+            self.assertIn(f"type=bind,src={artifact.resolve()},dst=/run/results", content)
+            self.assertTrue((artifact/"server.reproduce.container.sh").is_file())
+            self.assertFalse((result/"server.reproduce.sh").exists())
+
+    def test_aggregate_command_wins_over_instance_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); model=root/"model"; model.mkdir(); src=root/"input.jsonl"; src.write_text("{}\n"); idx=root/"index.json"; idx.write_text("{}")
+            runtime=FakeRuntime(server_command=True, server_command_subdir="formal/AUTO/run_001")
+            metadata={"image":"x/y@sha256:"+"a"*64,"model_host":str(model),"jsonl_host":str(src),"index_host":str(idx),"benchmark_dir":str(root),"candidates":{"c":{"gpu_indexes":[0]}}}
+            adapter=ReplayAdapter(metadata, root/"run", runtime); task=PlanTask("t",0,"c",run_class="formal")
+            result=Path(adapter(task,1))
+            aggregate=result/"formal/AUTO/run_001"
+            instances=aggregate/"instances/0"
+            instances.mkdir(parents=True)
+            (instances/"server.command.sh").write_text("echo instance\n", encoding="utf-8")
+            (aggregate/"server.evidence.json").write_text("{}\n", encoding="utf-8")
+            adapter._write_server_reproduce_script(runtime.specs[0], result)
+            self.assertTrue((aggregate/"server.reproduce.sh").is_file())
+            self.assertFalse((instances/"server.reproduce.sh").exists())
 
     def test_default_profile_is_portable_auto_profile(self):
         with tempfile.TemporaryDirectory() as td:

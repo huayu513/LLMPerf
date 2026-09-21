@@ -164,7 +164,7 @@ python3 -m web.server --host 0.0.0.0 --port 18080
 2. 在前端点击“生成计划”。这一步执行 `python3 benchctl.py plan --config ...`，只创建 result 目录和 `plan.json`，不会开始压测。
 3. 在“候选规划”页检查每个 candidate。点进 candidate 可以看拓扑、GPU 分配、TP/DP/PP、DP Attention、MoE backend、DSpark、内存比例、chunked prefill，以及预计传给 SGLang 的启动参数。
 4. 确认计划后点击“开始搜索”。这一步执行 `python3 benchctl.py run --plan <result-dir>/plan.json`。
-5. 运行过程中可以在 Jobs 页看当前后台命令、stdout 事件和最新输出；在 Trials 页看每个 trial 的状态、吞吐和失败原因；点进 trial 或 candidate 的 artifact 可以看 `server.log`、`docker.log`、`server.command.sh`、`server.reproduce.sh`、`server.evidence.json`、`server.info.json` 和 `*.summary.json`。其中 `server.command.sh` 是容器内真实 SGLang 命令，`server.reproduce.sh` 可以在宿主机用 `bash server.reproduce.sh` 启动同镜像、同挂载、同 GPU 选择和同端口映射的 server。
+5. 运行过程中可以在 Jobs 页看当前后台命令、stdout 事件和最新输出；在 Trials 页看每个 trial 的状态、吞吐和失败原因；点进 trial 或 candidate 的 artifact 可以看 `server.log`、`docker.log`、`server.command.sh`、`server.reproduce.sh`、`server.evidence.json`、`server.info.json` 和 `*.summary.json`。这些文件位于 replay 输出目录（例如 `trials/<task>/attempt-001/formal/AUTO/.../run_001/`），不一定直接位于 `attempt-001/` 根目录。其中 `server.command.sh` 是容器内真实 SGLang 命令，`server.reproduce.sh` 可以在宿主机用 `bash server.reproduce.sh` 启动同镜像、同挂载、同 GPU 选择和同端口映射的 server。多实例结果还会在 `instances/<id>/` 下保留每个实例的命令快照；应使用和 `server.evidence.json` 同目录的聚合脚本。
 6. 如果需要暂停当前搜索或 resume，在 Jobs 页选中正在运行的任务，点击“停止选中任务”。这会向当前 `benchctl.py` 子进程发送中断信号；已经完成并写入的 trial 会保留，之后继续点击“严格 Resume”。
 7. 如果某个候选启动失败，先看 `server.log` 和 `server.evidence.json`。修复 Automation 代码或启动脚本后，可以回到该 candidate，点击“单独重跑这个参数”。单独重跑结果会写入 `debug-trials/`，不改自动搜索的 `best.json` 和 `search-state.json`。
 

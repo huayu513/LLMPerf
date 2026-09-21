@@ -515,22 +515,34 @@ class ReplayAdapter:
         """
 
         attempt_dir = Path(attempt_dir).resolve()
-        server_command = attempt_dir / "server.command.sh"
-        if not server_command.is_file():
+        command_paths = sorted(attempt_dir.rglob("server.command.sh"))
+        if not command_paths:
             return None
+        # run_deployment_point.py also stores one command per instance. The
+        # command next to the aggregate evidence is the reproducible root
+        # command; fall back to the shallowest command for older artifacts.
+        evidence_paths = {
+            path.parent
+            for path in attempt_dir.rglob("server.evidence.json")
+        }
+        server_command = next(
+            (path for path in command_paths if path.parent in evidence_paths),
+            min(command_paths, key=lambda path: (len(path.relative_to(attempt_dir).parts), str(path))),
+        )
+        artifact_dir = server_command.parent
 
         mounts = []
         mounted_results = False
         for mount in spec.mounts:
             if mount.dst == "/run/results":
-                mounts.append(Mount(attempt_dir, "/run/results", False))
+                mounts.append(Mount(artifact_dir, "/run/results", False))
                 mounted_results = True
             else:
                 mounts.append(mount)
         if not mounted_results:
-            mounts.append(Mount(attempt_dir, "/run/results", False))
+            mounts.append(Mount(artifact_dir, "/run/results", False))
 
-        container_script = attempt_dir / "server.reproduce.container.sh"
+        container_script = artifact_dir / "server.reproduce.container.sh"
         container_script.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n\n"
@@ -566,7 +578,7 @@ class ReplayAdapter:
             host_port=host_port,
         )
         argv = DockerRuntime().build_run_command(reproduce_spec)
-        script = attempt_dir / "server.reproduce.sh"
+        script = artifact_dir / "server.reproduce.sh"
         script.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n\n"
