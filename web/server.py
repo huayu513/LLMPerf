@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Single-server web console for Automation runs.
+"""Single-server web console for LLMPerf runs.
 
 The server intentionally uses only the Python standard library so the
-Automation directory remains copyable to benchmark hosts.  Its HTTP API is
+LLMPerf directory remains copyable to benchmark hosts.  Its HTTP API is
 kept small and REST-shaped; it can be moved to FastAPI later without changing
 the static frontend contract.
 """
@@ -30,30 +30,30 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-AUTOMATION_ROOT = Path(__file__).resolve().parents[1]
-if str(AUTOMATION_ROOT) not in sys.path:
-    sys.path.insert(0, str(AUTOMATION_ROOT))
+LLMPERF_ROOT = Path(__file__).resolve().parents[1]
+if str(LLMPERF_ROOT) not in sys.path:
+    sys.path.insert(0, str(LLMPERF_ROOT))
 
-from automation.adapters import (  # noqa: E402
+from llmperf.adapters import (  # noqa: E402
     ReplayAdapter,
     _effective_chat_template_kwargs,
     read_attempt,
 )
-from automation.artifacts import write_json_atomic  # noqa: E402
-from automation.docker_runtime import DockerRuntime  # noqa: E402
-from automation.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
-from automation.search import (  # noqa: E402
+from llmperf.artifacts import write_json_atomic  # noqa: E402
+from llmperf.docker_runtime import DockerRuntime  # noqa: E402
+from llmperf.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
+from llmperf.search import (  # noqa: E402
     _candidate_gpu_count,
     _next_concurrency,
     _start_concurrency,
     collect_results,
 )
-from automation.types import PlanTask  # noqa: E402
-from automation.workflow import _bundle_fingerprint  # noqa: E402
+from llmperf.types import PlanTask  # noqa: E402
+from llmperf.workflow import _bundle_fingerprint  # noqa: E402
 
-DEFAULT_RESULT_ROOT = Path(os.environ.get("AUTOMATION_RESULT_ROOT", "/data/hjh/Automation/results"))
-DEFAULT_CONFIG_PATH = Path(os.environ.get("AUTOMATION_CONFIG", str(AUTOMATION_ROOT / "configs" / "experiment.json")))
-MAX_ARTIFACT_BYTES = int(os.environ.get("AUTOMATION_WEB_MAX_ARTIFACT_BYTES", str(2 * 1024 * 1024)))
+DEFAULT_RESULT_ROOT = Path(os.environ.get("LLMPERF_RESULT_ROOT", "/data/hjh/LLMPerf/results"))
+DEFAULT_CONFIG_PATH = Path(os.environ.get("LLMPERF_CONFIG", str(LLMPERF_ROOT / "configs" / "experiment.json")))
+MAX_ARTIFACT_BYTES = int(os.environ.get("LLMPERF_WEB_MAX_ARTIFACT_BYTES", str(2 * 1024 * 1024)))
 
 
 def utc_now() -> str:
@@ -664,7 +664,7 @@ class JobManager:
             "name": name,
             "kind": "function",
             "argv": [],
-            "cwd": str(AUTOMATION_ROOT),
+            "cwd": str(LLMPERF_ROOT),
             "target_run": str(target_run.resolve()) if target_run is not None else None,
             "status": "running",
             "returncode": None,
@@ -898,22 +898,22 @@ def python_executable() -> str:
 
 
 def benchctl_argv(command: str, *args: str) -> list[str]:
-    return [python_executable(), str(AUTOMATION_ROOT / "benchctl.py"), command, *args]
+    return [python_executable(), str(LLMPERF_ROOT / "benchctl.py"), command, *args]
 
 
 def run_plan_job(config_path: Path) -> dict[str, Any]:
-    return JOBS.create_subprocess("plan", benchctl_argv("plan", "--config", str(config_path)), AUTOMATION_ROOT)
+    return JOBS.create_subprocess("plan", benchctl_argv("plan", "--config", str(config_path)), LLMPERF_ROOT)
 
 
 def run_saved_plan_job(run_dir: Path, resume: bool = False) -> dict[str, Any]:
     argv = benchctl_argv("run", "--plan", str(run_dir / "plan.json"))
     if resume:
         argv.append("--resume")
-    return JOBS.create_subprocess("resume" if resume else "run", argv, AUTOMATION_ROOT, target_run=run_dir)
+    return JOBS.create_subprocess("resume" if resume else "run", argv, LLMPERF_ROOT, target_run=run_dir)
 
 
 def run_auto_job(config_path: Path) -> dict[str, Any]:
-    return JOBS.create_subprocess("auto", benchctl_argv("auto", "--config", str(config_path)), AUTOMATION_ROOT)
+    return JOBS.create_subprocess("auto", benchctl_argv("auto", "--config", str(config_path)), LLMPERF_ROOT)
 
 
 def collect_run(run_dir: Path) -> dict[str, Any]:
@@ -1006,7 +1006,7 @@ def load_debug_context(run_dir: Path, candidate_id: str) -> tuple[dict[str, Any]
     candidates = {c["id"]: c for c in plan_doc.get("candidates", []) if isinstance(c, dict) and c.get("id")}
     candidate = find_candidate(plan_doc, candidate_id)
     metadata["candidates"] = candidates
-    metadata["benchmark_dir"] = str(AUTOMATION_ROOT / "benchmarks")
+    metadata["benchmark_dir"] = str(LLMPERF_ROOT / "benchmarks")
     metadata["debug_current_bundle_fingerprint"] = _bundle_fingerprint()
     return plan_doc, metadata, candidates, candidate
 
@@ -1236,7 +1236,7 @@ def official_repair_worker(
     candidate = repair_candidate_config(plan_doc, row)
     candidates[str(candidate["id"])] = candidate
     metadata["candidates"] = candidates
-    metadata["benchmark_dir"] = str(AUTOMATION_ROOT / "benchmarks")
+    metadata["benchmark_dir"] = str(LLMPERF_ROOT / "benchmarks")
     metadata["repair_current_bundle_fingerprint"] = _bundle_fingerprint()
 
     task = plan_task_from_trial_row(row, candidate)
@@ -1525,8 +1525,8 @@ def start_debug_search(run_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-class AutomationHandler(BaseHTTPRequestHandler):
-    server_version = "AutomationWeb/0.1"
+class LLMPerfHandler(BaseHTTPRequestHandler):
+    server_version = "LLMPerfWeb/0.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
@@ -1597,7 +1597,7 @@ class AutomationHandler(BaseHTTPRequestHandler):
     def handle_get_api(self, parts: list[str], query: dict[str, list[str]]) -> None:
         if parts == ["settings"]:
             return self.send_json({
-                "automation_root": str(AUTOMATION_ROOT),
+                "llmperf_root": str(LLMPERF_ROOT),
                 "default_result_root": str(DEFAULT_RESULT_ROOT),
                 "default_config_path": str(DEFAULT_CONFIG_PATH),
                 "python": sys.executable,
@@ -1734,27 +1734,27 @@ def run_detail(run_dir: Path) -> dict[str, Any]:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Start the local Automation web console")
-    parser.add_argument("--host", default=os.environ.get("AUTOMATION_WEB_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("AUTOMATION_WEB_PORT", "18080")))
+    parser = argparse.ArgumentParser(description="Start the local LLMPerf web console")
+    parser.add_argument("--host", default=os.environ.get("LLMPERF_WEB_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("LLMPERF_WEB_PORT", "18080")))
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    server = ThreadingHTTPServer((args.host, args.port), AutomationHandler)
+    server = ThreadingHTTPServer((args.host, args.port), LLMPerfHandler)
     print(json.dumps({
-        "event": "automation_web_started",
+        "event": "llmperf_web_started",
         "url": f"http://{args.host}:{args.port}/",
         "default_result_root": str(DEFAULT_RESULT_ROOT),
-        "automation_root": str(AUTOMATION_ROOT),
+        "llmperf_root": str(LLMPERF_ROOT),
         "python": sys.executable,
     }, ensure_ascii=False), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         JOBS.stop_all()
-        print("stopping Automation web console", file=sys.stderr)
+        print("stopping LLMPerf web console", file=sys.stderr)
         return 130
     finally:
         server.server_close()

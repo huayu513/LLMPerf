@@ -2,13 +2,13 @@
 
 **Final review status: all reported findings resolved; no outstanding findings in this scoped review.**
 
-Scope: read-only review of `automation/planner.py`, `automation/search.py`, `automation/workflow.py`, and `benchctl.py`, against tasks 3/4 of the approved single-configuration plan. No source changes, Docker, GPU activity, image operations, network access, or model execution. Reproductions used Python 3.11 and deterministic fake executors in temporary directories.
+Scope: read-only review of `llmperf/planner.py`, `llmperf/search.py`, `llmperf/workflow.py`, and `benchctl.py`, against tasks 3/4 of the approved single-configuration plan. No source changes, Docker, GPU activity, image operations, network access, or model execution. Reproductions used Python 3.11 and deterministic fake executors in temporary directories.
 
 ## Original findings (resolved)
 
 ### 1. P1 — Screening permanently excludes later strategies and does not replace failed candidates
 
-Locations: `automation/search.py:143–150`; ordering source `automation/planner.py:131–132`.
+Locations: `llmperf/search.py:143–150`; ordering source `llmperf/planner.py:131–132`.
 
 `screen_count` is fixed to `(max_trials - repetitions) // 4`, and the controller only visits `plan.candidates[:screen_count]`. The cutoff counts failed smoke attempts as occupied screening slots and never draws replacements from the remaining plan.
 
@@ -20,7 +20,7 @@ Recommendation: select the initial screening set across strategy families, and b
 
 ### 2. P2 — Open-loop scale rounding reuses the wrong trial and reports false completion
 
-Locations: `automation/search.py:232–233` and cached result return at `automation/search.py:95–110`.
+Locations: `llmperf/search.py:232–233` and cached result return at `llmperf/search.py:95–110`.
 
 The trial suffix uses `f'-s{scale:g}'`, whose default precision collapses distinct accepted scale values. With `search.open_loop_scales = [1.0, 1.0000001]`, both requests map to the same task ID. The second call reuses the first result without checking the requested scale.
 
@@ -42,7 +42,7 @@ Original finding 2 is resolved. Original finding 1's strategy-prefix exclusion a
 
 ### Follow-up P2 (resolved) — Failed-screen backfill can consume every adaptive-search slot
 
-Location: `automation/search.py:143–156`.
+Location: `llmperf/search.py:143–156`.
 
 The loop now continues until `screen_count` candidates have valid smoke and baseline results, even after usable candidates have been found. Failed replacements consume the entire `explore_limit`; the subsequent doubling and neighbor probes then have no trial slots left.
 
@@ -53,7 +53,7 @@ Recommendation: once successful candidates exist, stop replacement screening ear
 
 ## Final scoped verification
 
-Reviewed the screening-budget fix at `automation/search.py:143–162`. Once a viable baseline exists, the controller stops replacement screening at half the exploration allowance. Its screening accounting comes from visited attempts, preserving the same scheduling path when completed trials are reused. Failed-only screening can still continue to later candidates.
+Reviewed the screening-budget fix at `llmperf/search.py:143–162`. Once a viable baseline exists, the controller stops replacement screening at half the exploration allowance. Its screening accounting comes from visited attempts, preserving the same scheduling path when completed trials are reused. Failed-only screening can still continue to later candidates.
 
 Independently reran the complete planner/search test modules under Python 3.11: **18 tests passed**. The new regression reproduces the 64-candidate case with only c0 usable, confirms a verified winner above concurrency 1, and confirms resume returns the identical winner with zero new executor calls. Prior failed-only backfill, strategy-family coverage, close-scale identity, plateau/OOM, repeat reservation, and resume regressions also pass.
 

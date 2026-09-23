@@ -1,4 +1,4 @@
-"""Portable, single-configuration throughput automation."""
+"""Portable, single-configuration throughput LLMPerf."""
 
 from .errors import ConfigError
 

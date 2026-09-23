@@ -1,6 +1,6 @@
-# Automation 自动吞吐压测
+# LLMPerf 自动吞吐压测
 
-只维护 `configs/experiment.json`，用一条命令完成模型识别、环境检查、输入索引、参数搜索、重复验证和结果收集。`Automation/` 可单独复制到目标机器，不依赖旁边的 sglang 或其他 benchmarks 目录。
+只维护 `configs/experiment.json`，用一条命令完成模型识别、环境检查、输入索引、参数搜索、重复验证和结果收集。`LLMPerf/` 可单独复制到目标机器，不依赖旁边的 sglang 或其他 benchmarks 目录。
 
 ## 首次部署与启动
 
@@ -25,7 +25,7 @@ docker image inspect "$IMAGE" \
 `image` 要填写实际不可变的仓库 digest，示例占位符不可直接运行。命令行直接跑完整流程使用：
 
 ```bash
-cd /path/to/Automation
+cd /path/to/LLMPerf
 python3 benchctl.py auto --config configs/experiment.json
 ```
 
@@ -39,7 +39,7 @@ python3 benchctl.py auto --config configs/experiment.json
 4. 默认不做单独 smoke。探索阶段直接启动候选服务并跑有用的小样本请求集。`search.start_concurrency` 和 `search.concurrency_max` 可以明确控制并发起点和终点；起点省略时按所选 GPU 数估算，例如 2 卡默认从 16 开始，8 卡默认从 64 开始。之后每次增加 16 个并发，吞吐增长不足或请求失败时停止该分支，并测试内存比例和 prefill 大小的少量邻近设置。
 5. 探索层和全量层都不使用固定 topK：所有与当前 top1 输出 tokens/s 差距在 `promotion_tolerance` 内的候选点都会晋级或复跑。最终层使用完整请求集独立重复验证，按输出 tokens/s 中位数选赢家。只有请求成功、服务端 completion usage 可用、输入摘要一致且实际服务参数可核验的结果才参与排名。
 
-每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。启动前会检查挂载的 `.sh`、`.py` 和 `.env` 文件；如果上传过程把 LF 转成了 CRLF，会在本次 run 的结果目录下生成 LF 副本并使用它，不修改原始 Automation 目录。
+每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。启动前会检查挂载的 `.sh`、`.py` 和 `.env` 文件；如果上传过程把 LF 转成了 CRLF，会在本次 run 的结果目录下生成 LF 副本并使用它，不修改原始 LLMPerf 目录。
 
 自动方案的服务设置默认开启 high thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=high`；只有显式的 `model_overrides.chat_template_kwargs` 会覆盖这个默认。原始请求对象仍原样回放，采样参数和输出长度不参与吞吐调优。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
 
@@ -152,11 +152,11 @@ python3 benchctl.py collect --run /path/to/result-dir
 如果要先看计划、逐个检查候选参数、查看启动日志，推荐启动本地 Web 控制台：
 
 ```bash
-cd /data/hjh/Automation
+cd /data/hjh/LLMPerf
 python3 -m web.server --host 0.0.0.0 --port 18080
 ```
 
-浏览器打开 `http://服务器IP:18080/`。页面默认扫描 `/data/hjh/Automation/results`，也可以在页面顶部修改结果目录。配置文件默认指向 `configs/experiment.json`，也可以改成其他 JSON。
+浏览器打开 `http://服务器IP:18080/`。页面默认扫描 `/data/hjh/LLMPerf/results`，也可以在页面顶部修改结果目录。配置文件默认指向 `configs/experiment.json`，也可以改成其他 JSON。
 
 从 0 开始调试推荐按这个顺序操作：
 
@@ -166,7 +166,7 @@ python3 -m web.server --host 0.0.0.0 --port 18080
 4. 确认计划后点击“开始搜索”。这一步执行 `python3 benchctl.py run --plan <result-dir>/plan.json`。
 5. 运行过程中可以在 Jobs 页看当前后台命令、stdout 事件和最新输出；在 Trials 页看每个 trial 的状态、吞吐和失败原因；点进 trial 或 candidate 的 artifact 可以看 `server.log`、`docker.log`、`server.command.sh`、`server.reproduce.sh`、`server.evidence.json`、`server.info.json` 和 `*.summary.json`。这些文件位于 replay 输出目录（例如 `trials/<task>/attempt-001/formal/AUTO/.../run_001/`），不一定直接位于 `attempt-001/` 根目录。其中 `server.command.sh` 是容器内真实 SGLang 命令，`server.reproduce.sh` 可以在宿主机用 `bash server.reproduce.sh` 启动同镜像、同挂载、同 GPU 选择和同端口映射的 server。多实例结果还会在 `instances/<id>/` 下保留每个实例的命令快照；应使用和 `server.evidence.json` 同目录的聚合脚本。
 6. 如果需要暂停当前搜索或 resume，在 Jobs 页选中正在运行的任务，点击“停止选中任务”。这会向当前 `benchctl.py` 子进程发送中断信号；已经完成并写入的 trial 会保留，之后继续点击“严格 Resume”。
-7. 如果某个候选启动失败，先看 `server.log` 和 `server.evidence.json`。修复 Automation 代码或启动脚本后，可以回到该 candidate，点击“单独重跑这个参数”。单独重跑结果会写入 `debug-trials/`，不改自动搜索的 `best.json` 和 `search-state.json`。
+7. 如果某个候选启动失败，先看 `server.log` 和 `server.evidence.json`。修复 LLMPerf 代码或启动脚本后，可以回到该 candidate，点击“单独重跑这个参数”。单独重跑结果会写入 `debug-trials/`，不改自动搜索的 `best.json` 和 `search-state.json`。
 
 如果服务器上已经有一部分实验结果，重新启动控制台后直接使用已有结果：
 
@@ -175,14 +175,14 @@ python3 -m web.server --host 0.0.0.0 --port 18080
 3. 在 Jobs 页可以查看当前是否有 resume/search 子进程正在运行；选中任务后可以看实时输出，必要时点击“停止选中任务”暂停。
 4. 如果 `results-index.json` 缺失或想重新汇总，点击 “Collect”。
 5. 如果代码、模型、输入、镜像和 GPU 都没有变化，点击“严格 Resume”。这一步执行 `python3 benchctl.py run --plan <result-dir>/plan.json --resume`。
-6. 如果只修改并上传了 Automation 运行代码，严格 Resume 可能提示 `benchmark runtime changed since planning`。确认要用当前代码继续旧计划时，点击“接受当前代码 Resume”。前端会先备份原始 `plan.json` 和 `search-state.json` 到 `runtime-adoptions/`，再刷新运行时代码 fingerprint，然后继续 resume。
+6. 如果只修改并上传了 LLMPerf 运行代码，严格 Resume 可能提示 `benchmark runtime changed since planning`。确认要用当前代码继续旧计划时，点击“接受当前代码 Resume”。前端会先备份原始 `plan.json` 和 `search-state.json` 到 `runtime-adoptions/`，再刷新运行时代码 fingerprint，然后继续 resume。
 
-“接受当前代码 Resume”只表示沿用旧 `plan.json` 里的候选参数，用当前 Automation 代码继续跑。它不会重新生成候选列表；如果模型、输入、镜像、GPU 或配置发生变化，应重新从配置生成新的 run。
+“接受当前代码 Resume”只表示沿用旧 `plan.json` 里的候选参数，用当前 LLMPerf 代码继续跑。它不会重新生成候选列表；如果模型、输入、镜像、GPU 或配置发生变化，应重新从配置生成新的 run。
 
 命令行也可以分两步执行同样流程：
 
 ```bash
-cd /data/hjh/Automation
+cd /data/hjh/LLMPerf
 python3 benchctl.py plan --config configs/experiment.json
 python3 benchctl.py run --plan /path/to/result-dir/plan.json
 python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume
@@ -190,10 +190,10 @@ python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume
 
 ## 本地验证
 
-测试使用合成元数据、捕获请求和替身运行器，不启动真实 GPU 压测。包内测试可从包含 `s1slow` 的目录运行：
+测试使用合成元数据、捕获请求和替身运行器，不启动真实 GPU 压测。在 LLMPerf 仓库根目录运行：
 
 ```bash
-python3 -B -m unittest discover -s s1slow/Automation/tests -v
+python3 -B -m unittest discover -s tests -v
 ```
 
 复制后的目录可以直接运行 `python3 benchctl.py --help`。实际硬件、checkpoint 和镜像的兼容性由目标机器上的环境探测、探索样本和最终完整输入复跑确认。
@@ -201,7 +201,7 @@ python3 -B -m unittest discover -s s1slow/Automation/tests -v
 # 查看运行状态
 先选最新一次 run：
 
-cd /data/hjh/Automation
+cd /data/hjh/LLMPerf
 RUN=$(ls -dt results/* | head -1)
 echo "$RUN"
 

@@ -29,7 +29,7 @@ uses 180 seconds so image imports and embedded SGLang help inspection can
 finish.
 
 Verification used
-`python3 -B -m unittest s1slow.Automation.tests.test_capabilities`: 18 tests
+`python3 -B -m unittest s1slow.LLMPerf.tests.test_capabilities`: 18 tests
 ran with zero failures. The embedded `_CONTAINER_PROBE` also compiled under
 Python 3.11. Tests used a fake command runner, so development made no Docker,
 network, or GPU probes.

@@ -1,4 +1,4 @@
-# Single configuration automation implementation plan
+# Single configuration LLMPerf implementation plan
 
 > **For agentic workers:** Use superpowers:subagent-driven-development for the independent discovery/runtime tasks and review their integration. Track completion here.
 
@@ -23,7 +23,7 @@
 
 ### Task 1: Single configuration and discovery
 
-Files: create automation/configuration.py, automation/discovery.py, tests/test_configuration.py, tests/test_discovery.py.
+Files: create llmperf/configuration.py, llmperf/discovery.py, tests/test_configuration.py, tests/test_discovery.py.
 
 Interfaces: load_config(Path) -> RunConfig; config fields model_path: Path, input_path: Path, image: str, output_dir: Path|None, gpu_indexes: tuple[int,...]|None, search: SearchConfig, warmup: int, request_timeout: float, ready_timeout: int, model_overrides: dict, docker: DockerConfig, source_path: Path. SearchConfig defaults: concurrency_max=64, repetitions=3, max_trials=64, max_seconds=14400; optional backends and open_loop_scales tuples. discover_model(model_path, overrides=None) -> existing ModelManifest. inspect_workload(input_path) -> existing WorkloadManifest with sha256 and raw count/models metadata. Model raw contains metadata, model_type, num_attention_heads, num_hidden_layers, is_moe and provenance.
 
@@ -34,7 +34,7 @@ Interfaces: load_config(Path) -> RunConfig; config fields model_path: Path, inpu
 
 ### Task 2: Runtime parameter and evidence contract
 
-Files: automation/adapters.py, benchmarks/config/portable.env, benchmarks/server/profiles/AUTO.sh, benchmarks/server/common.sh, benchmarks/server/launch_server.sh, benchmarks/run_point.sh, benchmarks/replay/run_replay.sh; runtime tests.
+Files: llmperf/adapters.py, benchmarks/config/portable.env, benchmarks/server/profiles/AUTO.sh, benchmarks/server/common.sh, benchmarks/server/launch_server.sh, benchmarks/run_point.sh, benchmarks/replay/run_replay.sh; runtime tests.
 
 Interfaces: retain ReplayAdapter.build_spec(task, attempt, attempt_dir), __call__ returning attempt directory. Add read_attempt(attempt_dir, task, metadata, exit_code=0) -> dict normalized result with status, reasons, output_tokens_per_second, summary_path, candidate_id, concurrency. New metadata forwards parsers, template kwargs, profile_env, quantization if required, warmup/timeouts. Candidate static_config includes tp/dp/pp, dp_attention/dp_lm_head, backend (runner), moe_a2a_backend, dspark, mem_fraction_static, max_running_requests, chunked_prefill_size. Docker device mapping is physical at allocation, dense logical inside the container. Readiness/server parameter evidence must be explicit and validated; do not rank exit code alone.
 
@@ -44,7 +44,7 @@ Interfaces: retain ReplayAdapter.build_spec(task, attempt, attempt_dir), __call_
 
 ### Task 3: Automatic candidate planning and measured search
 
-Files: automation/planner.py, automation/search.py, tests/test_search.py, planner tests.
+Files: llmperf/planner.py, llmperf/search.py, tests/test_search.py, planner tests.
 
 Interfaces: create_search_plan(config, model, workload, env, result_dir) -> Plan; execute_search(plan, run_root, executor=None, resume=False) -> dict. Executor callback(task, attempt) returns normalized dict. Search increases concurrency by 16 until plateau/failure/bound, screens candidates fairly before deeper search, and reserves repeated full-workload validation; optional open-loop evidence is separate from closed-loop winner. Budget limits new trials and stops cleanly. Results and decisions persist; resumed runs validate input/plan identity and completed artifacts.
 
@@ -54,7 +54,7 @@ Interfaces: create_search_plan(config, model, workload, env, result_dir) -> Plan
 
 ### Task 4: One CLI and cleanup
 
-Files: benchctl.py, automation/workflow.py, configuration example, README.md, tests/test_workflow.py; remove unreferenced legacy manifests/configs/wrappers/schemas/tests.
+Files: benchctl.py, llmperf/workflow.py, configuration example, README.md, tests/test_workflow.py; remove unreferenced legacy manifests/configs/wrappers/schemas/tests.
 
 - [x] Test one-command lifecycle with injected environment/runtime, copied bundle CLI, failures before expensive runs and fresh output directories.
 - [x] Implement auto --config, doctor/prepare/plan --config, run --plan [--resume], collect --run using the same resolved contract.
@@ -83,11 +83,11 @@ Files: benchctl.py, automation/workflow.py, configuration example, README.md, te
 
 ## Final verification
 
-- Complete suite: **94 tests passed**, Python 3.11, including execution of the actual shell evidence writer through the host normalizer. Log: `/tmp/automation-final-suite.log`.
+- Complete suite: **94 tests passed**, Python 3.11, including execution of the actual shell evidence writer through the host normalizer. Log: `/tmp/LLMPerf-final-suite.log`.
 - Final independent review: both original reproductions (DeepSeek V3 static Jinja and nested CUDA graph backend fields) pass; **32 focused tests passed**, no outstanding review findings.
 - All **28 Python sources** compile and all **22 shell/env files** pass `bash -n`.
 - Copied-directory CLI validation is included in the passing suite. All 15 preserved manual profiles match the pre-change archive byte for byte.
 - `configs/` contains only `experiment.json`. Removed four cache directories and four legacy standalone `.pyc` files; no runtime references to deleted configuration/loader/registry paths remain.
 - No Docker launch, image pull/build, checkpoint code execution, or real GPU benchmark was performed during verification.
 - Scope is a measured best within the generated candidate set and budget, not a guarantee of global optimality. Real checkpoint/image/hardware compatibility remains a deployment-time probe and smoke-test concern.
-- No Git repository was available; the pre-change archive is `/tmp/automation-before-KiypXe/Automation.tar.gz`.
+- No Git repository was available; the pre-change archive is `/tmp/LLMPerf-before-KiypXe/LLMPerf.tar.gz`.

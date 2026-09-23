@@ -26,7 +26,7 @@ def _probe_config(config, root):
 def _bundle_fingerprint():
     root = Path(__file__).resolve().parents[1]
     sources = [root / 'benchctl.py']
-    for name in ('automation', 'benchmarks'):
+    for name in ('llmperf', 'benchmarks'):
         sources.extend(p for p in (root / name).rglob('*')
                        if p.is_file() and p.suffix in {'.py', '.sh', '.env'})
     return fingerprint({str(p.relative_to(root)): sha256_file(p) for p in sorted(sources)})

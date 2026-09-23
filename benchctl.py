@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Portable one-configuration throughput automation (Python 3.11+)."""
+"""Portable one-configuration throughput LLMPerf (Python 3.11+)."""
 from __future__ import annotations
 
 import argparse
@@ -10,15 +10,15 @@ from pathlib import Path
 if sys.version_info < (3, 11):
     raise SystemExit('benchctl requires Python 3.11 or newer')
 
-# The local package works when Automation is copied without its parent tree.
+# The local package works when LLMPerf is copied without its parent tree.
 if __package__:
-    from .automation.errors import ConfigError
-    from .automation.search import collect_results
-    from .automation.workflow import run_saved_plan, run_workflow
+    from .llmperf.errors import ConfigError
+    from .llmperf.search import collect_results
+    from .llmperf.workflow import run_saved_plan, run_workflow
 else:
-    from automation.errors import ConfigError
-    from automation.search import collect_results
-    from automation.workflow import run_saved_plan, run_workflow
+    from llmperf.errors import ConfigError
+    from llmperf.search import collect_results
+    from llmperf.workflow import run_saved_plan, run_workflow
 
 
 def main(argv=None):
