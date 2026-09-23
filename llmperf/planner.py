@@ -178,6 +178,20 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         world_size=world, gpu_indexes=deployment['gpu_indexes'],
                                         logical_gpu_count=deployment['total_gpu_count'],
                                         deployment=deployment,
+                                        # A comparison group keeps the valid
+                                        # baseline and DP-attention layouts
+                                        # together. Their exact DP values can
+                                        # differ because SGLang's DP-attention
+                                        # world size is TP*PP rather than
+                                        # TP*DP*PP.
+                                        comparison_group=(
+                                            f"{deployment['ascii_label']}-"
+                                            f"g{'_'.join(map(str, deployment['gpu_indexes']))}-"
+                                            f"tp{tp}-pp{pp}"
+                                        ),
+                                        feature_variant=(
+                                            "dp_attention" if dpa else "baseline"
+                                        ) + ("+dspark" if dspark else ""),
                                         moe_a2a_backend='none' if is_moe else None,
                                         mem_fraction_static=0.85, max_running_requests=config.search.concurrency_max,
                                         chunked_prefill_size=8192)
@@ -210,6 +224,11 @@ def create_search_plan(config, model, workload, env, result_dir):
         for family in families.values():
             if family:
                 candidates.append(family.popleft())
+    comparison_groups = defaultdict(list)
+    for candidate in candidates:
+        group = candidate.static_config.get('comparison_group')
+        if group:
+            comparison_groups[group].append(candidate.id)
     models = workload.raw.get('models', {})
     if len(models) != 1:
         raise ConfigError('input must contain one request.model alias for a single checkpoint')
@@ -227,6 +246,7 @@ def create_search_plan(config, model, workload, env, result_dir):
         name_prefix=config.docker.name_prefix, service_port=config.docker.service_port, network_mode=config.docker.network_mode,
         shm_size=config.docker.shm_size, ipc=config.docker.ipc,
         candidates={c.id: asdict(c) for c in candidates},
+        comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',
         search_scope='homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP, advertised MoE runners, supported DSpark; runtime validation required')
     if model.raw.get('provenance', {}).get('quantization') == 'model_overrides.quantization':

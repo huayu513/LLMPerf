@@ -252,6 +252,8 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
             "deployment_label": deployment.get("label"),
             "instance_count": deployment.get("instance_count"),
             "gpus_per_instance": deployment.get("gpus_per_instance"),
+            "comparison_group": static.get("comparison_group"),
+            "feature_variant": static.get("feature_variant"),
             "mem_fraction_static": static.get("mem_fraction_static"),
             "max_running_requests": static.get("max_running_requests"),
             "chunked_prefill_size": static.get("chunked_prefill_size"),
