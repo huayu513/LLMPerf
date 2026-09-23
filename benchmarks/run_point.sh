@@ -187,12 +187,12 @@ replay_args=(
 [[ -n "$limit" ]] && replay_args+=(--limit "$limit")
 [[ "$verify_source" == "0" ]] && replay_args+=(--no-verify-source)
 
-output_dir="$("$REPLAY" "${replay_args[@]}" --print-output-dir)"
+output_dir="$(bash "$REPLAY" "${replay_args[@]}" --print-output-dir)"
 
 if [[ "$dry_run" == "1" ]]; then
-  "$LAUNCHER" dry-run "$profile"
+  bash "$LAUNCHER" dry-run "$profile"
   echo
-  "$REPLAY" "${replay_args[@]}" --dry-run
+  bash "$REPLAY" "${replay_args[@]}" --dry-run
   exit 0
 fi
 
@@ -278,7 +278,7 @@ cleanup() {
     wait "$monitor_pid" 2>/dev/null || true
   fi
   if [[ "$server_started" == "1" && "$keep_server" != "1" ]]; then
-    "$LAUNCHER" stop || stop_exit_code="$?"
+    bash "$LAUNCHER" stop || stop_exit_code="$?"
   fi
   if [[ "$stop_exit_code" != "0" ]]; then
     echo "error: server stop failed with exit code ${stop_exit_code}" >&2
@@ -303,12 +303,12 @@ if command -v curl >/dev/null 2>&1 &&
 fi
 
 server_log="${output_dir}/server.log"
-"$LAUNCHER" start "$profile" --log-file "$server_log"
+bash "$LAUNCHER" start "$profile" --log-file "$server_log"
 server_started=1
 
 deadline="$((SECONDS + ready_timeout))"
 while ! curl -fsS --max-time 5 "${base_url%/}/health" >/dev/null 2>&1; do
-  "$LAUNCHER" status >/dev/null ||
+  bash "$LAUNCHER" status >/dev/null ||
     die "SGLang exited before becoming ready; inspect ${server_log}"
   ! startup_log_has_failure "$server_log" ||
     die "SGLang logged a startup exception before becoming ready; inspect ${server_log}"

@@ -155,18 +155,23 @@ def _search(value: Any, label: str) -> SearchConfig:
         )
         if len(set(scales)) != len(scales):
             raise ConfigError(f"{label}.open_loop_scales must not contain duplicates")
+    concurrency_max = _integer(
+        data.get("concurrency_max", 64), f"{label}.concurrency_max", 1
+    )
     start_concurrency = None
     if data.get("start_concurrency") is not None:
         start_concurrency = _integer(data["start_concurrency"], f"{label}.start_concurrency", 1)
+        if start_concurrency > concurrency_max:
+            raise ConfigError(
+                f"{label}.start_concurrency must be <= {label}.concurrency_max"
+            )
     promotion_tolerance = _number(
         data.get("promotion_tolerance", 0.05), f"{label}.promotion_tolerance", 0.0
     )
     if promotion_tolerance >= 1.0:
         raise ConfigError(f"{label}.promotion_tolerance must be < 1.0")
     return SearchConfig(
-        concurrency_max=_integer(
-            data.get("concurrency_max", 64), f"{label}.concurrency_max", 1
-        ),
+        concurrency_max=concurrency_max,
         start_concurrency=start_concurrency,
         explore_request_limit=_integer(
             data.get("explore_request_limit", 256), f"{label}.explore_request_limit", 0

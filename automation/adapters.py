@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import shlex
+import shutil
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,68 @@ from urllib.parse import urlsplit
 
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .types import DockerConfig, PlanTask
+
+
+_LINE_ENDING_NORMALIZED_SUFFIXES = frozenset({".env", ".py", ".sh"})
+
+
+def _script_files(root: Path):
+    return (
+        path for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in _LINE_ENDING_NORMALIZED_SUFFIXES
+    )
+
+
+def _contains_crlf(root: Path) -> bool:
+    for path in _script_files(root):
+        try:
+            data = path.read_bytes()
+        except OSError:
+            raise
+        if b"\r" in data:
+            return True
+    return False
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def _normalized_benchmark_dir(source: Path, run_root: Path) -> Path:
+    """Return a runnable LF copy when an uploaded bundle contains CRLF.
+
+    Automation bind-mounts its benchmark scripts into the container.  A
+    checkout copied from a Windows filesystem can therefore make a valid
+    ``#!/usr/bin/env bash`` line resolve to the invalid interpreter ``bash\\r``.
+    Keep the user's bundle untouched and stage a normalized copy only when a
+    script-like file actually contains carriage returns.  The staged tree is
+    retained below the run directory so generated reproduction scripts keep
+    pointing at a valid, immutable bundle.
+    """
+
+    source = Path(source).resolve()
+    if not source.is_dir() or not _contains_crlf(source):
+        return source
+
+    stage = (Path(run_root).resolve().parent / ".automation-benchmarks-lf")
+    # Test fixtures and some copied layouts put the result directory inside
+    # the benchmark source.  Never copy a directory into itself recursively.
+    if _path_is_under(stage, source):
+        stage = source.parent / f".{source.name}.automation-benchmarks-lf"
+    stage = stage.with_name(stage.name + "-" + uuid.uuid4().hex[:12])
+    shutil.copytree(source, stage, copy_function=shutil.copy2)
+    for path in _script_files(stage):
+        data = path.read_bytes()
+        if b"\x00" in data:
+            continue
+        normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if normalized != data:
+            path.write_bytes(normalized)
+    return stage
 
 
 _DEFAULT_CHAT_TEMPLATE_KWARGS = {
@@ -360,6 +423,8 @@ class ReplayAdapter:
         self.candidates = candidates if isinstance(candidates, Mapping) else {}
         self.run_root = Path(run_root)
         self.runtime = runtime or DockerRuntime()
+        self._benchmark_source: Path | None = None
+        self._benchmark_runtime_dir: Path | None = None
 
     def _value(self, *keys: str, default: Any = None) -> Any:
         for key in keys:
@@ -377,6 +442,10 @@ class ReplayAdapter:
         result_dir = Path(attempt_dir or (self.run_root / task.id / f"attempt-{attempt:03d}")).resolve()
         result_dir.mkdir(parents=True, exist_ok=True)
         benchmark_dir = Path(str(self._value("benchmark_dir", default=Path(__file__).resolve().parents[1] / "benchmarks"))).resolve()
+        if self._benchmark_source != benchmark_dir:
+            self._benchmark_source = benchmark_dir
+            self._benchmark_runtime_dir = _normalized_benchmark_dir(benchmark_dir, self.run_root)
+        benchmark_dir = self._benchmark_runtime_dir or benchmark_dir
         profile = str(self._value("profile", default="AUTO"))
         controller_class = _controller_class(task, self.metadata)
         mode = str(task.mode).replace("_", "-")
