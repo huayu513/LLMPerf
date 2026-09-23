@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 import statistics
 import time
 from dataclasses import asdict
@@ -15,6 +16,29 @@ from .types import PlanTask
 
 
 _CONCURRENCY_STEP = 16
+_OOM_REASON_RE = re.compile(
+    r"\b(?:out[\s_-]*of[\s_-]*memory|outofmemoryerror|oom(?:[\s_-]*killed)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_oom_failure(result):
+    """Whether a result is an out-of-memory failure.
+
+    OOM can happen while a server is starting, before any readiness or replay
+    evidence exists.  It remains a failure for the current candidate, but it
+    does not prove that the explicit runner backend is incompatible with every
+    other deployment topology.
+    """
+
+    if not isinstance(result, dict):
+        return False
+    if result.get("failure_kind") == "oom" or result.get("out_of_memory") is True:
+        return True
+    reasons = result.get("reasons", ())
+    if not isinstance(reasons, (list, tuple, set)):
+        return False
+    return any(_OOM_REASON_RE.search(str(reason)) for reason in reasons)
 
 
 def _candidate_backend(candidate):
@@ -46,6 +70,8 @@ def _is_startup_failure(result):
     """
 
     if not isinstance(result, dict):
+        return False
+    if _is_oom_failure(result):
         return False
     failure_phase = result.get("failure_phase")
     if failure_phase in {"startup", "replay"}:

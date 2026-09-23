@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import shlex
 import shutil
 import uuid
@@ -305,6 +306,7 @@ def _evidence_fingerprint(artifact_dir: Path, summary_path: Path | None, attempt
         artifact_dir / "run_manifest.json",
         artifact_dir / "server.command.sh",
         attempt_path / "container-exit-code",
+        attempt_path / "container-oom-killed",
     ]
     if any(path is None or not path.is_file() for path in paths[:5]):
         return None
@@ -343,6 +345,35 @@ _STARTUP_FAILURE_REASONS = frozenset({
     "server_evidence_inconsistent",
     "resolved_parameters_missing",
 })
+
+
+_OOM_LOG_RE = re.compile(
+    r"\b(?:out[\s_-]*of[\s_-]*memory|outofmemoryerror|oom(?:[\s_-]*killed)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _oom_log_paths(attempt_path: Path) -> tuple[Path, ...]:
+    """Return attempt logs that contain an out-of-memory diagnostic.
+
+    Startup OOMs often leave no replay summary or server evidence, so the
+    absence of those artifacts cannot distinguish them from an incompatible
+    launch.  The controller and every deployment instance write diagnostics
+    below the attempt directory; inspect only log files and stream them line
+    by line so a large server log does not need to be loaded into memory.
+    """
+
+    matches: list[Path] = []
+    for path in sorted(attempt_path.rglob("*.log")):
+        if not path.is_file():
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as source:
+                if any(_OOM_LOG_RE.search(line) for line in source):
+                    matches.append(path)
+        except OSError:
+            continue
+    return tuple(matches)
 
 
 def _failure_phase(
@@ -669,6 +700,13 @@ class ReplayAdapter:
         spec = self.build_spec(task, attempt, attempt_dir)
         result = self.runtime.run(spec, attempt_dir / "docker.log")
         self._write_server_reproduce_script(spec, attempt_dir)
+        inspect = getattr(result, "inspect", {})
+        state = inspect.get("State", {}) if isinstance(inspect, Mapping) else {}
+        oom_killed = isinstance(state, Mapping) and (
+            state.get("OOMKilled") is True or state.get("oom_killed") is True
+        )
+        if oom_killed:
+            (attempt_dir / "container-oom-killed").write_text("1\n", encoding="utf-8")
         exit_path = attempt_dir / "container-exit-code"
         exit_temp = attempt_dir / ".container-exit-code.tmp"
         exit_temp.write_text(f"{result.exit_code}\n", encoding="utf-8")
@@ -733,6 +771,13 @@ def read_attempt(
         "evidence_fingerprint": _evidence_fingerprint(artifact_dir, summary_path, attempt_path),
     }
     reasons: list[str] = result["reasons"]
+    oom_marker = attempt_path / "container-oom-killed"
+    oom_logs = _oom_log_paths(attempt_path)
+    if oom_marker.is_file() or oom_logs:
+        result["failure_kind"] = "oom"
+        result["oom_log_paths"] = [str(path) for path in oom_logs]
+        result["container_oom_killed"] = oom_marker.is_file()
+        reasons.append("out_of_memory")
     if exit_code != 0:
         reasons.append(f"process_exit_{exit_code}")
     if len(summaries) > 1:
