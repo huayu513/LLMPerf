@@ -1,0 +1,5 @@
+# Keep every executable and configuration file portable across hosts.
+*.sh text eol=lf
+*.py text eol=lf
+*.env text eol=lf
+*.json text eol=lf

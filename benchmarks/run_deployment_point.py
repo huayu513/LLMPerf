@@ -292,7 +292,10 @@ def main() -> int:
             instance_dir = results_root / "instances" / str(instance["id"])
             instance_dir.mkdir(parents=True, exist_ok=True)
             log_file = instance_dir / "server.log"
-            command = [str(LAUNCHER), "start", args.profile, "--log-file", str(log_file)]
+            # Invoke through bash so an uploaded bundle does not depend on
+            # executable-bit preservation or a shebang being honored by the
+            # host filesystem.
+            command = ["bash", str(LAUNCHER), "start", args.profile, "--log-file", str(log_file)]
             subprocess.run(command, env=env, check=True)
             started.append((instance, env))
 
@@ -303,7 +306,7 @@ def main() -> int:
             url = base_urls[offset].rstrip("/") + "/health"
             while not http_ok(url, timeout=5.0):
                 status = subprocess.run(
-                    [str(LAUNCHER), "status"],
+                    ["bash", str(LAUNCHER), "status"],
                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     check=False,
                 )
@@ -407,7 +410,7 @@ def main() -> int:
         if not args.keep_server:
             for instance, env in reversed(started):
                 try:
-                    subprocess.run([str(LAUNCHER), "stop"], env=env, check=True)
+                    subprocess.run(["bash", str(LAUNCHER), "stop"], env=env, check=True)
                 except subprocess.CalledProcessError as exc:
                     stop_exit = stop_exit or int(exc.returncode)
                     print(f"error: stopping instance {instance.get('id')} failed with {exc.returncode}", file=sys.stderr)
