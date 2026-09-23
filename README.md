@@ -35,7 +35,7 @@ python3 benchctl.py auto --config configs/experiment.json
 
 1. 读取 checkpoint 中的 `config.json` 等元数据，识别已适配的 Qwen、GLM MoE、DeepSeek 模型及量化信息。模型目录可以任意命名；共用架构名称的变体结合静态聊天模板识别。未适配或证据不足时给出具体原因及同文件覆盖方式，不执行模型目录里的 Python 代码进行识别。
 2. 验证原始 JSONL，统计请求、读取请求使用的服务名称并计算 SHA-256。单次实验要求一个 `request.model` 名称，服务端使用这个名称；请求对象原样回放。
-3. 探测 GPU 数量、型号、显存、拓扑及镜像内的 SGLang 选项、parser、后端列表。按同型号/算力/显存的 GPU 分组生成部署拓扑和 TP/DP/PP 候选，过滤注意力头数等静态不兼容组合。若选择 2 张卡，会真实比较 `2卡1实例` 与 `2卡2实例`；若选择 8 张卡，会比较 `8卡1/2/4/8实例`。MIG 暂不支持。
+3. 探测 GPU 数量、型号、显存、拓扑及镜像内的 SGLang 选项、parser、后端列表。按同型号/算力/显存的 GPU 分组生成部署拓扑和 TP/DP/PP 候选，过滤注意力头数等静态不兼容组合。若选择 2 张卡，会真实比较 `2卡1实例` 与 `2卡2实例`；若选择 8 张卡，会比较 `8卡1/2/4/8实例`。MIG 暂不支持。计划中的 `comparison_group` 会把同一部署、TP、PP 下可比较的普通 DP 与 DP Attention 方案放在一起；两者的 DP 数可能不同，这是因为 SGLang 开启 DP Attention 后的进程世界大小是 `TP×PP`，关闭时是 `TP×DP×PP`。
 4. 默认不做单独 smoke。探索阶段直接启动候选服务并跑有用的小样本请求集。`search.start_concurrency` 和 `search.concurrency_max` 可以明确控制并发起点和终点；起点省略时按所选 GPU 数估算，例如 2 卡默认从 16 开始，8 卡默认从 64 开始。之后每次增加 16 个并发，吞吐增长不足或请求失败时停止该分支，并测试内存比例和 prefill 大小的少量邻近设置。
 5. 探索层和全量层都不使用固定 topK：所有与当前 top1 输出 tokens/s 差距在 `promotion_tolerance` 内的候选点都会晋级或复跑。最终层使用完整请求集独立重复验证，按输出 tokens/s 中位数选赢家。只有请求成功、服务端 completion usage 可用、输入摘要一致且实际服务参数可核验的结果才参与排名。
 
@@ -164,7 +164,7 @@ python3 -m web.server --host 0.0.0.0 --port 18080
 2. 在前端点击“生成计划”。这一步执行 `python3 benchctl.py plan --config ...`，只创建 result 目录和 `plan.json`，不会开始压测。
 3. 在“候选规划”页检查每个 candidate。点进 candidate 可以看拓扑、GPU 分配、TP/DP/PP、DP Attention、MoE backend、DSpark、内存比例、chunked prefill，以及预计传给 SGLang 的启动参数。
 4. 确认计划后点击“开始搜索”。这一步执行 `python3 benchctl.py run --plan <result-dir>/plan.json`。
-5. 运行过程中可以在 Jobs 页看当前后台命令、stdout 事件和最新输出；在 Trials 页看每个 trial 的状态、吞吐和失败原因；点进 trial 或 candidate 的 artifact 可以看 `server.log`、`docker.log`、`server.command.sh`、`server.reproduce.sh`、`server.evidence.json`、`server.info.json` 和 `*.summary.json`。这些文件位于 replay 输出目录（例如 `trials/<task>/attempt-001/formal/AUTO/.../run_001/`），不一定直接位于 `attempt-001/` 根目录。其中 `server.command.sh` 是容器内真实 SGLang 命令，`server.reproduce.sh` 可以在宿主机用 `bash server.reproduce.sh` 启动同镜像、同挂载、同 GPU 选择和同端口映射的 server。多实例结果还会在 `instances/<id>/` 下保留每个实例的命令快照；应使用和 `server.evidence.json` 同目录的聚合脚本。
+5. 运行过程中可以在 Jobs 页看当前后台命令、stdout 事件和最新输出；在 Trials 页看每个 trial 的状态、吞吐和失败原因；点进 trial 或 candidate 的 artifact 可以看 `server.log`、`docker.log`、`server.command.sh`、`server.reproduce.sh`、`server.evidence.json`、`server.info.json` 和 `*.summary.json`。这些文件位于 replay 输出目录（例如 `trials/<task>/attempt-001/formal/AUTO/.../run_001/`），不一定直接位于 `attempt-001/` 根目录。其中 `server.command.sh` 是容器内真实 SGLang 命令；`server.reproduce.sh` 已把命令嵌入脚本，可以复制到另一台具备相同 Docker 镜像、宿主机模型路径、足够数量的兼容 GPU 和可用端口的服务器后，用 `bash server.reproduce.sh` 单独启动 server，不需要原始 JSONL、replay index 或 benchmark 目录。脚本按 GPU 数量申请设备，不绑定原服务器的物理 GPU 编号。多实例结果还会在 `instances/<id>/` 下保留每个实例的命令快照；应使用和 `server.evidence.json` 同目录的聚合脚本。
 6. 如果需要暂停当前搜索或 resume，在 Jobs 页选中正在运行的任务，点击“停止选中任务”。这会向当前 `benchctl.py` 子进程发送中断信号；已经完成并写入的 trial 会保留，之后继续点击“严格 Resume”。
 7. 如果某个候选启动失败，先看 `server.log` 和 `server.evidence.json`。修复 LLMPerf 代码或启动脚本后，可以回到该 candidate，点击“单独重跑这个参数”。单独重跑结果会写入 `debug-trials/`，不改自动搜索的 `best.json` 和 `search-state.json`。
 

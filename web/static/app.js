@@ -322,7 +322,7 @@ function renderCandidates() {
   }
   box.className = "table-wrap";
   var html = '<table><thead><tr>';
-  ["candidate", "状态", "拓扑", "GPU", "TP/DP/PP", "DPA", "backend", "DSpark", "mem", "chunked", "当前最佳 trial"].forEach(function(name) {
+  ["candidate", "状态", "拓扑", "GPU", "TP/DP/PP", "DPA", "backend", "DSpark", "对照组", "功能组合", "mem", "chunked", "当前最佳 trial"].forEach(function(name) {
     html += "<th>" + escapeHtml(name) + "</th>";
   });
   html += "</tr></thead><tbody>";
@@ -336,6 +336,8 @@ function renderCandidates() {
     html += "<td>" + pretty(c.dp_attention) + "</td>";
     html += "<td>" + escapeHtml(pretty(c.backend)) + "</td>";
     html += "<td>" + pretty(c.dspark) + "</td>";
+    html += "<td class=\"code\">" + escapeHtml(c.comparison_group || "-") + "</td>";
+    html += "<td>" + escapeHtml(c.feature_variant || "-") + "</td>";
     html += "<td>" + pretty(c.mem_fraction_static) + "</td>";
     html += "<td>" + pretty(c.chunked_prefill_size) + "</td>";
     html += "<td>" + (c.best_output_tokens_per_second ? pretty(c.best_output_tokens_per_second) + " @ c" + pretty(c.best_concurrency) : "-") + "</td>";

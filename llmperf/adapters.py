@@ -610,8 +610,10 @@ class ReplayAdapter:
         """Write a host-side script that starts the captured server command.
 
         server.command.sh is intentionally the exact command observed inside
-        the benchmark container. This companion script rebuilds the Docker
-        wrapper so a user can reproduce the same server from a host terminal.
+        the benchmark container. The generated host script embeds those
+        commands directly so it can be copied to another host. A standalone
+        server does not need the replay JSONL, replay index, benchmark bundle,
+        or the original results directory.
         """
 
         attempt_dir = Path(attempt_dir).resolve()
@@ -631,60 +633,92 @@ class ReplayAdapter:
         )
         artifact_dir = server_command.parent
 
-        mounts = []
-        mounted_results = False
-        for mount in spec.mounts:
-            if mount.dst == "/run/results":
-                mounts.append(Mount(artifact_dir, "/run/results", False))
-                mounted_results = True
-            else:
-                mounts.append(mount)
-        if not mounted_results:
-            mounts.append(Mount(artifact_dir, "/run/results", False))
+        try:
+            command_lines = [
+                line.strip()
+                for line in server_command.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        except OSError:
+            return None
+        if not command_lines:
+            return None
 
-        container_script = artifact_dir / "server.reproduce.container.sh"
-        container_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n\n"
-            "pids=()\n"
-            "cleanup() {\n"
-            "  local pid\n"
-            "  for pid in \"${pids[@]:-}\"; do\n"
-            "    kill \"$pid\" 2>/dev/null || true\n"
-            "  done\n"
-            "}\n"
-            "trap cleanup INT TERM EXIT\n\n"
-            "while IFS= read -r line; do\n"
-            "  [[ \"$line\" =~ ^[[:space:]]*$ ]] && continue\n"
-            "  [[ \"$line\" =~ ^[[:space:]]*# ]] && continue\n"
-            "  bash -lc \"$line\" &\n"
-            "  pids+=(\"$!\")\n"
-            "done < /run/results/server.command.sh\n\n"
-            "if [[ \"${#pids[@]}\" == \"0\" ]]; then\n"
-            "  echo \"no server commands found in /run/results/server.command.sh\" >&2\n"
-            "  exit 2\n"
-            "fi\n\n"
-            "wait -n \"${pids[@]}\"\n",
-            encoding="utf-8",
-        )
-        container_script.chmod(container_script.stat().st_mode | 0o111)
+        # The captured command already contains the complete server-side
+        # environment (``setsid env ... sglang serve ...``). Keep only the
+        # model mount from the replay Docker spec; all other mounts belong to
+        # the benchmark controller rather than the server.
+        model_mounts = tuple(mount for mount in spec.mounts if mount.dst == "/model")
+        if len(model_mounts) != 1:
+            return None
+
+        container_script_lines = [
+            "set -euo pipefail",
+            "pids=()",
+            "cleanup() {",
+            "  local pid",
+            "  for pid in \"${pids[@]:-}\"; do",
+            "    kill \"$pid\" 2>/dev/null || true",
+            "  done",
+            "}",
+            "trap cleanup INT TERM EXIT",
+            "",
+        ]
+        for line in command_lines:
+            container_script_lines.append(f"bash -lc {shlex.quote(line)} &")
+            container_script_lines.append('pids+=("$!")')
+        container_script_lines += [
+            "",
+            'if [[ "${#pids[@]}" == "0" ]]; then',
+            '  echo "no server commands found in the captured command" >&2',
+            "  exit 2",
+            "fi",
+            "",
+            'wait -n "${pids[@]}"',
+        ]
+        container_script = "\n".join(container_script_lines) + "\n"
 
         host_port = spec.host_port if spec.host_port is not None else spec.internal_port
         reproduce_spec = replace(
             spec,
             name=cls._reproduce_container_name(spec.name),
-            mounts=tuple(mounts),
-            command=("bash", "/run/results/server.reproduce.container.sh"),
+            mounts=model_mounts,
+            env={},
+            command=("bash", "-lc", container_script),
             host_port=host_port,
         )
         argv = DockerRuntime().build_run_command(reproduce_spec)
+
+        # Logical CUDA indexes in the captured commands refer to the GPUs
+        # visible inside the container. Request the same count instead of
+        # pinning the source host's physical GPU IDs, which may differ on the
+        # destination server.
+        if spec.gpu_indexes:
+            gpu_option = argv.index("--gpus")
+            argv[gpu_option + 1] = str(len(spec.gpu_indexes))
+
+        # A deployment command contains one ``--port`` per instance. Publish
+        # each of those ports on localhost so the copied script preserves the
+        # aggregate deployment's endpoint layout.
+        ports: list[int] = []
+        for line in command_lines:
+            match = re.search(r"(?:^|\s)--port\s+(\d+)(?:\s|$)", line)
+            if match:
+                port = int(match.group(1))
+                if port not in ports:
+                    ports.append(port)
+        if len(ports) > 1:
+            image_index = len(argv) - len(reproduce_spec.command) - 1
+            extra = [item for port in ports[1:] for item in ("--publish", f"127.0.0.1:{port}:{port}")]
+            argv[image_index:image_index] = extra
+
         script = artifact_dir / "server.reproduce.sh"
         script.write_text(
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n\n"
             "# Host-side reproduction wrapper generated by LLMPerf.\n"
-            "# It starts the same Docker image/mounts/GPU selection and then\n"
-            "# executes the recorded server.command.sh command(s) inside the container.\n"
+            "# It starts the same Docker image/model mount/GPU count and then\n"
+            "# executes the captured server command(s) embedded below.\n"
             "# The container publishes the SGLang port on localhost.\n"
             f"exec {shlex.join(argv)}\n",
             encoding="utf-8",
