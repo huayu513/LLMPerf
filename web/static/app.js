@@ -218,7 +218,7 @@ async function loadSettings() {
   el("result-root").value = state.resultRoot;
   el("config-path").value = state.configPath;
   el("server-state").innerHTML =
-    "<div>" + escapeHtml(state.settings.automation_root) + '</div><div class="small">Python: ' + escapeHtml(state.settings.python) + "</div>";
+    "<div>" + escapeHtml(state.settings.llmperf_root) + '</div><div class="small">Python: ' + escapeHtml(state.settings.python) + "</div>";
 }
 
 async function loadRuns() {
@@ -594,7 +594,7 @@ async function collectRun() {
 }
 
 async function adoptRuntime() {
-  if (!window.confirm("确认接受当前 Automation 代码继续 resume？会备份并更新 plan.json / search-state.json 的 fingerprint。")) return;
+  if (!window.confirm("确认接受当前 LLMPerf 代码继续 resume？会备份并更新 plan.json / search-state.json 的 fingerprint。")) return;
   var note = window.prompt("备注，可留空：", "frontend adopt current runtime") || "";
   await api(runPath("/adopt-runtime"), { method: "POST", body: { note: note } });
   await selectRun(state.selectedRunId);

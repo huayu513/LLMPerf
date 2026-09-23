@@ -1,4 +1,4 @@
-"""Strict loader for the single-file automation configuration."""
+"""Strict loader for the single-file LLMPerf configuration."""
 from __future__ import annotations
 
 import json

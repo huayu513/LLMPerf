@@ -1,2 +1,2 @@
-"""Local web console for Automation result inspection and debugging."""
+"""Local web console for LLMPerf result inspection and debugging."""
 

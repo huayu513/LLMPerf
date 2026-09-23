@@ -1,6 +1,6 @@
 # Task 1: single configuration and discovery report
 
-Implemented automation/configuration.py and automation/discovery.py, with behavior tests in tests/test_configuration.py and tests/test_discovery.py.
+Implemented llmperf/configuration.py and llmperf/discovery.py, with behavior tests in tests/test_configuration.py and tests/test_discovery.py.
 
 ## Configuration
 
@@ -24,7 +24,7 @@ Implemented automation/configuration.py and automation/discovery.py, with behavi
 
 - Required Python 3.11 targeted suite: 18 tests passed, including actual concatenated-Jinja parser markers and ambiguity regressions.
 - Python compilation check passed for both implementation modules and both test modules.
-- A concurrent full Automation run executed 84 tests and reported four failures in runtime adapter/shell-contract files outside Task 1. Configuration and discovery tests passed; the root integration owner is resolving those runtime failures before the final full-suite run.
+- A concurrent full LLMPerf run executed 84 tests and reported four failures in runtime adapter/shell-contract files outside Task 1. Configuration and discovery tests passed; the root integration owner is resolving those runtime failures before the final full-suite run.
 
 ## Limits
 

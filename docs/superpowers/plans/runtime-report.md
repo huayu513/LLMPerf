@@ -6,4 +6,4 @@ Each attempt saves native requested parameters, server info, resolved evidence, 
 
 The verified result exports effective values from native server info, preserves launch/planning values and hashes native artifacts. Cached results are revalidated during resume, and final repetitions must agree on effective configuration. Removed the unused adapter registry and scheduler-specific result validators.
 
-Verification: final 94-test suite passes, including the actual embedded evidence writer and copied Automation CLI; 28 Python sources compile and 22 shell/env files pass syntax checks. Independent review has no outstanding findings. No Docker or GPU execution was used for these checks.
+Verification: final 94-test suite passes, including the actual embedded evidence writer and copied LLMPerf CLI; 28 Python sources compile and 22 shell/env files pass syntax checks. Independent review has no outstanding findings. No Docker or GPU execution was used for these checks.
