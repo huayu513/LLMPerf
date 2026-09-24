@@ -21,6 +21,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LAUNCHER = SCRIPT_DIR / "server" / "launch_server.sh"
 REPLAY = SCRIPT_DIR / "replay" / "replay_jsonl_sglang.py"
 
+# SGLang derives DP-attention TCP/ZMQ endpoints from the HTTP service port.
+# Reserve a separate block for every instance instead of using adjacent ports.
+DEPLOYMENT_PORT_STRIDE = 256
+
 
 ALIASES = {
     "model_path": ("model_path",),
@@ -269,7 +273,25 @@ def main() -> int:
 
     base_port = int(os.environ.get("SERVER_PORT", "25080"))
     instances = list(deployment["instances"])
-    base_urls = [f"http://127.0.0.1:{base_port + offset}" for offset in range(len(instances))]
+    try:
+        port_stride = int(deployment.get("service_port_stride", DEPLOYMENT_PORT_STRIDE))
+    except (TypeError, ValueError):
+        die("deployment service_port_stride must be an integer")
+    if port_stride < 1:
+        die("deployment service_port_stride must be positive")
+    if os.environ.get("ENABLE_DP_ATTENTION", "0") == "1" and port_stride < DEPLOYMENT_PORT_STRIDE:
+        die(
+            "DP Attention multi-instance services require service_port_stride >= "
+            f"{DEPLOYMENT_PORT_STRIDE}; got {port_stride}"
+        )
+    last_reserved_port = base_port + (len(instances) - 1) * port_stride + port_stride - 1
+    if base_port < 1 or last_reserved_port > 65535:
+        die(
+            "multi-instance service port plan exceeds TCP port range: "
+            f"base={base_port} instances={len(instances)} stride={port_stride}"
+        )
+    service_ports = [base_port + offset * port_stride for offset in range(len(instances))]
+    base_urls = [f"http://127.0.0.1:{port}" for port in service_ports]
     endpoint_ids = [str(instance.get("id", f"i{offset}")) for offset, instance in enumerate(instances)]
     base_env = dict(os.environ)
 
@@ -280,7 +302,7 @@ def main() -> int:
 
         if args.dry_run:
             for offset, instance in enumerate(instances):
-                env = instance_env(base_env, results_root, instance, base_port + offset)
+                env = instance_env(base_env, results_root, instance, service_ports[offset])
                 command = [str(LAUNCHER), "dry-run", args.profile]
                 print(" ".join(command), "CUDA_VISIBLE_DEVICES=" + env["CUDA_VISIBLE_DEVICES"])
             final_exit = 0
@@ -288,7 +310,7 @@ def main() -> int:
             return final_exit
 
         for offset, instance in enumerate(instances):
-            env = instance_env(base_env, results_root, instance, base_port + offset)
+            env = instance_env(base_env, results_root, instance, service_ports[offset])
             instance_dir = results_root / "instances" / str(instance["id"])
             instance_dir.mkdir(parents=True, exist_ok=True)
             log_file = instance_dir / "server.log"

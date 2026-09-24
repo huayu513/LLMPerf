@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
+from .deployment_ports import DEPLOYMENT_PORT_STRIDE, deployment_service_ports
 from .types import DockerConfig, PlanTask
 
 
@@ -498,8 +499,15 @@ class ReplayAdapter:
         gpu_indexes = tuple(int(x) for x in (gpu_values or ()))
         service_port = int(self._value("service_port", default=DockerConfig().service_port))
         deployment = _deployment_with_logical_gpus(static.get("deployment", {}), gpu_indexes)
+        service_ports = [service_port]
         if deployment and int(deployment.get("instance_count", 1)) > 1:
             command_values[0:2] = ["python3", "/opt/s1slow/benchmarks/run_deployment_point.py"]
+            instance_count = int(deployment["instance_count"])
+            service_ports = deployment_service_ports(
+                service_port,
+                instance_count,
+                stride=DEPLOYMENT_PORT_STRIDE,
+            )
         limit = _task_request_limit(task, self.metadata)
         if limit is not None:
             command_values.extend(("--limit", str(max(0, int(limit)))))
@@ -523,9 +531,9 @@ class ReplayAdapter:
         }
         if deployment:
             deployment["service_port"] = service_port
+            deployment["service_port_stride"] = DEPLOYMENT_PORT_STRIDE
             deployment["base_urls"] = [
-                f"http://127.0.0.1:{service_port + offset}"
-                for offset in range(int(deployment.get("instance_count", 1)))
+                f"http://127.0.0.1:{port}" for port in service_ports
             ]
             env["S1_DEPLOYMENT"] = json.dumps(
                 deployment, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -940,7 +948,24 @@ def read_attempt(
             except (TypeError, ValueError):
                 instance_count = 1
         service_port = int(metadata.get("service_port", DockerConfig().service_port))
-        allowed_ports = {service_port + offset for offset in range(instance_count)}
+        explicit_stride = metadata.get("service_port_stride")
+        if explicit_stride is None and isinstance(deployment, Mapping):
+            explicit_stride = deployment.get("service_port_stride")
+        try:
+            deployment_stride = max(1, int(explicit_stride)) if explicit_stride is not None else None
+        except (TypeError, ValueError):
+            deployment_stride = None
+        if deployment_stride is None:
+            # Old artifacts used adjacent ports and did not record a stride.
+            # Accept both layouts while they are being read.
+            strides = (1, DEPLOYMENT_PORT_STRIDE)
+        else:
+            strides = (deployment_stride,)
+        allowed_ports = {
+            service_port + stride * offset
+            for stride in strides
+            for offset in range(instance_count)
+        }
         if not urls or any(not _local_loopback_url(url, allowed_ports) for url in urls):
             reasons.append("formal_url_not_loopback")
 
