@@ -8,6 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .artifacts import write_json_atomic
+from .deployment_ports import DEPLOYMENT_PORT_STRIDE
 from .errors import ConfigError
 from .types import CandidateConfig, Plan, PlanTask
 
@@ -97,6 +98,7 @@ def _deployment_layouts(gpu_group):
             'ascii_label': f'{total}g{instance_count}i',
             'gpu_indexes': gpus,
             'instances': instances,
+            'service_port_stride': DEPLOYMENT_PORT_STRIDE,
         })
     return layouts
 
@@ -244,6 +246,7 @@ def create_search_plan(config, model, workload, env, result_dir):
         expected_request_count=workload.raw['count'], model_fingerprint=fingerprint(asdict(model)),
         model_snapshot=asdict(model), environment=env.to_dict(), search=vars(config.search),
         name_prefix=config.docker.name_prefix, service_port=config.docker.service_port, network_mode=config.docker.network_mode,
+        service_port_stride=DEPLOYMENT_PORT_STRIDE,
         shm_size=config.docker.shm_size, ipc=config.docker.ipc,
         candidates={c.id: asdict(c) for c in candidates},
         comparison_groups=dict(comparison_groups),
