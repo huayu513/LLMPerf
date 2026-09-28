@@ -103,69 +103,6 @@ def _uses_mxfp4_experts(model) -> bool:
     return isinstance(routed, str) and routed.strip().lower() == 'mxfp4'
 
 
-def _is_deepseek_v4(model) -> bool:
-    raw = getattr(model, 'raw', {})
-    if not isinstance(raw, dict):
-        return False
-    model_type = str(raw.get('model_type') or '').lower().replace('-', '_')
-    if model_type in {'deepseek_v4', 'deepseekv4'}:
-        return True
-    architectures = raw.get('architectures', ())
-    return any('deepseekv4' in str(value).lower().replace('_', '')
-               for value in architectures if isinstance(value, str))
-
-
-def _profile_env_flag(model, name: str) -> bool:
-    profile_env = getattr(model, 'profile_env', {})
-    if not isinstance(profile_env, dict):
-        return False
-    expected = name.lower()
-    for key, value in profile_env.items():
-        if str(key).lower() == expected:
-            return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
-    return False
-
-
-def _sm_version(value):
-    text = str(value or '').strip().lower()
-    if text.startswith('sm'):
-        text = text[2:]
-    try:
-        number = float(text)
-    except (TypeError, ValueError):
-        return None
-    # nvidia-smi reports H100 as 9.0 while some inventories use sm90.
-    if number >= 10:
-        number /= 10
-    return number
-
-
-def _auto_backend_for_plan(model, groups, env, advertised):
-    """Resolve AUTO only when SGLang's model override is deterministic.
-
-    For mixed DeepSeek-V4 MXFP4 checkpoints, SGLang's CUDA override selects
-    ``flashinfer_mxfp4`` on SM90/100/120 when FP4 dequantization is not forced.
-    Returning a concrete backend here prevents the planner from benchmarking
-    the same launch once through AUTO and once explicitly.
-    """
-    if not (bool(getattr(model, 'raw', {}).get('is_moe'))
-            and _is_deepseek_v4(model)
-            and _uses_mxfp4_experts(model)):
-        return None
-    if _profile_env_flag(model, 'SGLANG_DSV4_FP4_DEQUANT'):
-        return None
-    if 'flashinfer_mxfp4' not in advertised:
-        return None
-    gpu_by_index = {gpu.index: gpu for gpu in getattr(env, 'gpus', ())}
-    supported_sms = {9.0, 10.0, 12.0}
-    for group in groups:
-        sms = {_sm_version(gpu_by_index[index].compute_capability)
-               for index in group if index in gpu_by_index}
-        if not sms or None in sms or not sms <= supported_sms:
-            return None
-    return 'flashinfer_mxfp4'
-
-
 def _deployment_layouts(gpu_group):
     gpus = tuple(gpu_group)
     total = len(gpus)
@@ -228,23 +165,20 @@ def create_search_plan(config, model, workload, env, result_dir):
         raise ConfigError('search.backends contains a backend not advertised by the configured image')
     is_moe = bool(model.raw.get('is_moe'))
     uses_mxfp4_experts = _uses_mxfp4_experts(model)
-    auto_backend = _auto_backend_for_plan(model, groups, env, advertised)
     if requested and not is_moe:
         raise ConfigError('search.backends selects MoE runners but this model is not identified as MoE')
     if requested:
-        backends = [auto_backend if b == 'auto' and auto_backend else None if b == 'auto' else b
-                    for b in requested]
+        backends = [None if b == 'auto' else b for b in requested]
     elif is_moe:
         relevant = ['triton', 'deep_gemm', 'flashinfer_trtllm']
         if uses_mxfp4_experts:
             relevant = ['flashinfer_mxfp4', 'triton']
-        backends = ([auto_backend] if auto_backend else [None]) + [
-            b for b in relevant if b in advertised and b != auto_backend
-        ]
+        backends = [None] + [b for b in relevant if b in advertised]
     else:
         backends = [None]
-    # Preserve explicit search order while removing AUTO/backend aliases that
-    # resolve to the same concrete launch configuration.
+    # Preserve search order while removing repeated requested backend values.
+    # Effective AUTO/backend equivalence is checked against the pinned image
+    # after candidate generation.
     backends = list(dict.fromkeys(backends))
     heads = model.raw.get('num_attention_heads')
     layers = model.raw.get('num_hidden_layers')
@@ -349,11 +283,6 @@ def create_search_plan(config, model, workload, env, result_dir):
         comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',
         search_scope='homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP, advertised MoE runners, supported DSpark; runtime validation required')
-    if auto_backend:
-        meta['backend_resolution'] = {
-            'auto': auto_backend,
-            'reason': 'DeepSeek-V4 MXFP4 experts on a CUDA SM90/SM100/SM120 GPU; SGLang model override is deterministic',
-        }
     if model.raw.get('provenance', {}).get('quantization') == 'model_overrides.quantization':
         meta['quantization'] = model.quantization
     return Plan(Path(result_dir).name, candidates=tuple(candidates), metadata=_jsonable(meta))

@@ -15,6 +15,7 @@ usage() {
   cat <<USAGE
 Usage:
   launch_server.sh dry-run PROFILE
+  launch_server.sh argv-json PROFILE
   launch_server.sh start PROFILE [--log-file PATH]
   launch_server.sh status
   launch_server.sh stop [--force]
@@ -350,6 +351,19 @@ stop_server() {
 
 action="${1:-}"
 case "$action" in
+  argv-json)
+    [[ "$#" -eq 2 ]] || { usage; exit 2; }
+    load_profile "$2"
+    build_command
+    python3 - "${#SERVER_ENV[@]}" "${SERVER_ENV[@]}" "${SERVER_COMMAND[@]}" <<'PY'
+import json
+import sys
+
+count = int(sys.argv[1])
+values = sys.argv[2:]
+print(json.dumps({"env": values[:count], "argv": values[count:]}, sort_keys=True))
+PY
+    ;;
   dry-run)
     [[ "$#" -eq 2 ]] || { usage; exit 2; }
     load_profile "$2"
