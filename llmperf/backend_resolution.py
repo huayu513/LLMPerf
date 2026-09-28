@@ -5,7 +5,7 @@ import json
 import subprocess
 import tempfile
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from .adapters import ReplayAdapter
@@ -23,7 +23,59 @@ _VOLATILE_ENV = {
 }
 
 
-def apply_backend_resolution(plan: Plan, results: dict, *, source: str) -> Plan:
+def expand_auto_backends(plan: Plan, results: dict) -> tuple[Plan, tuple[str, ...]]:
+    """Add concrete candidates discovered by the image's AUTO resolution.
+
+    The initial planner can only inspect checkpoint metadata and advertised
+    choices. SGLang may also infer the expert layout from weight headers, so
+    its resolved AUTO backend must be allowed to contribute to the plan.
+    """
+    if plan.metadata.get('search', {}).get('backends'):
+        return plan, ()  # An explicit search restriction remains authoritative.
+
+    existing = {(fingerprint({key: value for key, value in candidate.static_config.items()
+                              if key != 'backend'}), candidate.backend)
+                for candidate in plan.candidates}
+    added = []
+    candidates = []
+    metadata = dict(plan.metadata)
+    records = dict(metadata.get('candidates', {}))
+    groups = {name: list(ids) for name, ids in metadata.get('comparison_groups', {}).items()}
+    for candidate in plan.candidates:
+        candidates.append(candidate)
+        result = results.get(candidate.id, {})
+        backend = result.get('effective_backend')
+        if (candidate.backend is not None or result.get('status') != 'resolved'
+                or not isinstance(backend, str) or not backend or backend == 'auto'):
+            continue
+        context = fingerprint({key: value for key, value in candidate.static_config.items()
+                               if key != 'backend'})
+        if (context, backend) in existing:
+            continue
+        static = {**candidate.static_config, 'backend': backend}
+        digest = fingerprint(static)
+        deployment = static.get('deployment', {})
+        label = deployment.get('ascii_label', candidate.id)
+        ident = (f'{label}-tp{candidate.tp}-dp{candidate.dp}-pp{candidate.pp}-'
+                 f'a{int(candidate.dp_attention)}-{backend}-ds{int(candidate.dspark)}-{digest[:8]}')
+        if ident in records:
+            continue
+        concrete = replace(candidate, id=ident, backend=backend,
+                           static_config=static, config_hash=digest)
+        candidates.append(concrete)
+        records[ident] = asdict(concrete)
+        group = static.get('comparison_group')
+        if group:
+            groups.setdefault(group, []).append(ident)
+        existing.add((context, backend))
+        added.append(ident)
+    metadata['candidates'] = records
+    metadata['comparison_groups'] = groups
+    return replace(plan, candidates=tuple(candidates), metadata=metadata), tuple(added)
+
+
+def apply_backend_resolution(plan: Plan, results: dict, *, source: str,
+                             added: tuple[str, ...] = ()) -> Plan:
     """Remove AUTO only when an explicit candidate resolves identically."""
     signatures = {}
     for candidate in plan.candidates:
@@ -51,18 +103,27 @@ def apply_backend_resolution(plan: Plan, results: dict, *, source: str) -> Plan:
                     and results[candidate.id].get('effective_backend') == representative.backend):
                 removed[candidate.id] = representative.id
 
-    candidates = tuple(candidate for candidate in plan.candidates if candidate.id not in removed)
+    by_id = {candidate.id: candidate for candidate in plan.candidates}
+    rejected = {candidate_id: results.get(candidate_id, {'status': 'unavailable'})
+                for candidate_id in added
+                if (results.get(candidate_id, {}).get('status') != 'resolved'
+                    or results[candidate_id].get('effective_backend') !=
+                    by_id[candidate_id].backend)}
+    dropped = set(removed) | set(rejected)
+    candidates = tuple(candidate for candidate in plan.candidates if candidate.id not in dropped)
     metadata = dict(plan.metadata)
     metadata['candidates'] = {candidate.id: metadata['candidates'][candidate.id]
                               for candidate in candidates}
     metadata['comparison_groups'] = {
-        group: [candidate_id for candidate_id in ids if candidate_id not in removed]
+        group: [candidate_id for candidate_id in ids if candidate_id not in dropped]
         for group, ids in metadata.get('comparison_groups', {}).items()
     }
     metadata['backend_resolution'] = {
         'source': source,
         'results': results,
         'removed_auto_duplicates': removed,
+        'added_from_auto': [candidate_id for candidate_id in added if candidate_id not in rejected],
+        'rejected_auto_expansions': rejected,
     }
     return replace(plan, candidates=candidates, metadata=metadata)
 
@@ -104,7 +165,8 @@ def _read_resolution_output(output) -> dict:
     return results
 
 
-def resolve_in_image(plan: Plan, config, root: Path, *, runtime=None) -> dict:
+def resolve_in_image(plan: Plan, config, root: Path, *, runtime=None,
+                     candidate_ids: set[str] | None = None) -> dict:
     """Run the benchmark's own launcher and installed SGLang resolver in Docker.
 
     Cases sharing the same per-instance launch environment reuse one result;
@@ -119,6 +181,8 @@ def resolve_in_image(plan: Plan, config, root: Path, *, runtime=None) -> dict:
         adapter = ReplayAdapter(plan.metadata, scratch, runtime=runtime)
         benchmark_dir = None
         for candidate in plan.candidates:
+            if candidate_ids is not None and candidate.id not in candidate_ids:
+                continue
             if not plan.metadata.get('model_snapshot', {}).get('raw', {}).get('is_moe'):
                 continue
             task = PlanTask('resolve-' + candidate.id, 0, candidate.id,

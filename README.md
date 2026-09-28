@@ -36,7 +36,7 @@ python3 benchctl.py auto --config configs/experiment.json
 1. 读取 checkpoint 中的 `config.json` 等元数据，识别已适配的 Qwen、GLM MoE、DeepSeek 模型及量化信息。模型目录可以任意命名；共用架构名称的变体结合静态聊天模板识别。未适配或证据不足时给出具体原因及同文件覆盖方式，不执行模型目录里的 Python 代码进行识别。
 2. 验证原始 JSONL，统计请求、读取请求使用的服务名称并计算 SHA-256。单次实验要求一个 `request.model` 名称，服务端使用这个名称；请求对象原样回放。
 3. 探测 GPU 数量、型号、显存、拓扑及镜像内的 SGLang 选项、parser、后端列表。按同型号/算力/显存的 GPU 分组生成部署拓扑和 TP/DP/PP 候选，过滤注意力头数等静态不兼容组合。若选择 2 张卡，会真实比较 `2卡1实例` 与 `2卡2实例`；若选择 8 张卡，会比较 `8卡1/2/4/8实例`。MIG 暂不支持。计划中的 `comparison_group` 会把同一部署、TP、PP 下可比较的普通 DP 与 DP Attention 方案放在一起；两者的 DP 数可能不同，这是因为 SGLang 开启 DP Attention 后的进程世界大小是 `TP×PP`，关闭时是 `TP×DP×PP`。
-4. 对 MoE 候选，在实际配置的 Docker 镜像中使用同一启动脚本生成参数，调用该镜像的 SGLang 配置解析流程。只有 `AUTO` 与显式 backend 的解析后完整配置相同，才删除重复的 `AUTO` 候选；解析不可用或结果不确定时保留它。此阶段不启动服务、不加载权重，结果和去重依据写入 `backend-resolution.json` 及 `plan.json`。
+4. 对 MoE 候选，在实际配置的 Docker 镜像中使用同一启动脚本生成参数，调用该镜像的 SGLang 配置解析流程。若 `AUTO` 解析出了初始候选中没有的具体 backend，自动补入同拓扑的显式候选并再次解析；只有两者解析后的完整配置相同，才删除重复的 `AUTO`。显式候选解析失败时保留 `AUTO`；解析不可用或结果不确定时也保留它。此阶段不启动服务、不加载权重，结果、补充候选和去重依据写入 `backend-resolution.json` 及 `plan.json`。
 5. 默认不做单独 smoke。探索阶段直接启动候选服务并跑有用的小样本请求集。`search.start_concurrency` 和 `search.concurrency_max` 可以明确控制并发起点和终点；起点省略时按所选 GPU 数估算，例如 2 卡默认从 16 开始，8 卡默认从 64 开始。之后每次增加 16 个并发，吞吐增长不足或请求失败时停止该分支，并测试内存比例和 prefill 大小的少量邻近设置。
 6. 探索层和全量层都不使用固定 topK：所有与当前 top1 输出 tokens/s 差距在 `promotion_tolerance` 内的候选点都会晋级或复跑。最终层使用完整请求集独立重复验证，按输出 tokens/s 中位数选赢家。只有请求成功、服务端 completion usage 可用、输入摘要一致且实际服务参数可核验的结果才参与排名。
 
@@ -97,7 +97,7 @@ python3 benchctl.py auto --config configs/experiment.json
 | `request_timeout` | 单请求超时 3600 秒 |
 | `ready_timeout` | 服务就绪等待 3600 秒 |
 
-自动规划会生成 `AUTO` 和适合模型量化的镜像已声明后端，再用镜像内解析结果删除真正等价的 `AUTO` 候选。`search.backends` 仍可限制搜索范围，不影响自动去重。`search.open_loop_scales` 可选，例如 `[1, 2, 4]`，在闭环赢家验证之后按原始时间戳进行开环回放；默认不运行开环。开环结果独立记录，不用于替换闭环吞吐赢家。
+自动规划会生成 `AUTO` 和初始后端候选。镜像若根据权重布局等信息把 `AUTO` 解析为初始计划之外的 backend，规划会自动补入该显式候选，验证等价后再删除重复的 `AUTO`。`search.backends` 仍可限制搜索范围，不会被自动补入的后端突破。`search.open_loop_scales` 可选，例如 `[1, 2, 4]`，在闭环赢家验证之后按原始时间戳进行开环回放；默认不运行开环。开环结果独立记录，不用于替换闭环吞吐赢家。
 
 特殊模型适配可以通过同文件的 `model_overrides` 覆盖已支持的 parser、模板参数或模型专用环境变量，覆盖会记录来源。Docker 的网络、共享内存、IPC 和内部端口也可通过 `docker` 对象覆盖。内部服务端口默认是 `25080`；不要设置到常见 Linux 临时端口范围 `32768-60999`，因为 SGLang 启动时也会从该范围分配内部通信端口。拼错或不支持的字段会报错。
 

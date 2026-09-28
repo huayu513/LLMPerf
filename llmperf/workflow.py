@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .artifacts import sha256_file, write_json_atomic
-from .backend_resolution import apply_backend_resolution, resolve_in_image
+from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
 from .configuration import load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
@@ -77,13 +77,24 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
         else:
             resolutions = {}
             source = 'unavailable: image identity missing from environment probe'
-        plan = apply_backend_resolution(plan, resolutions, source=source)
+        plan, added = expand_auto_backends(plan, resolutions)
+        if added:
+            if backend_resolver is not None:
+                added_results = backend_resolver(plan, config, root)
+            else:
+                added_results = resolve_in_image(plan, config, root,
+                                                 candidate_ids=set(added))
+            resolutions.update({candidate_id: added_results[candidate_id]
+                                for candidate_id in added if candidate_id in added_results})
+        plan = apply_backend_resolution(plan, resolutions, source=source, added=added)
         write_json_atomic(root / 'backend-resolution.json', plan.metadata['backend_resolution'])
         print(json.dumps({'event': 'backend_resolution_done',
                           'resolved': sum(row.get('status') == 'resolved'
                                           for row in resolutions.values()),
                           'removed_auto_duplicates': len(
                               plan.metadata['backend_resolution']['removed_auto_duplicates']),
+                          'added_from_auto': len(
+                              plan.metadata['backend_resolution']['added_from_auto']),
                           'candidates': len(plan.candidates)}), flush=True)
     plan.metadata['configuration'] = configuration
     plan.metadata['bundle_fingerprint'] = _bundle_fingerprint()

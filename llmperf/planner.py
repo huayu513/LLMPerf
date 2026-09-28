@@ -282,7 +282,7 @@ def create_search_plan(config, model, workload, env, result_dir):
         candidates={c.id: asdict(c) for c in candidates},
         comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',
-        search_scope='homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP, advertised MoE runners, supported DSpark; runtime validation required')
+        search_scope='homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP, advertised or image-resolved MoE runners, supported DSpark; runtime validation required')
     if model.raw.get('provenance', {}).get('quantization') == 'model_overrides.quantization':
         meta['quantization'] = model.quantization
     return Plan(Path(result_dir).name, candidates=tuple(candidates), metadata=_jsonable(meta))
