@@ -1,13 +1,13 @@
 {
   "model_path": "/var/lib/docker/models/DeepSeek-V4-Flash-0731",
   "input_path": "/data/hjh/LLMPerf/input_data_0831.jsonl",
-  "image": "mirrors.sangfor.com/lmsysorg/sglang@sha256:50bc0c7713550a2f2e38c0d7d5d928c2f9093e1dbc703c0bdc66871f25fea004",
+  "image": "mirrors.sangfor.com/lmsysorg/sglang@sha256:06e4f2ed21afde4ff513cda65070124e727ba23ccaeff7712b8c40e1097d611f",
   "smoke": false,
   "gpu_indexes": [0, 1, 2, 3, 4, 5, 6, 7],
   "output_dir": "/data/hjh/LLMPerf/results",
   "search": {
-    "start_concurrency": 64,
-    "concurrency_max": 256,
+    "start_concurrency": 16,
+    "concurrency_max": 64,
     "max_trials": 666,
     "max_seconds": 864000,
     "explore_request_limit": 512
