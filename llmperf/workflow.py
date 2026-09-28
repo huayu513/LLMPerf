@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .artifacts import sha256_file, write_json_atomic
+from .backend_resolution import apply_backend_resolution, resolve_in_image
 from .capabilities import probe_environment
 from .configuration import load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
@@ -32,7 +33,8 @@ def _bundle_fingerprint():
     return fingerprint({str(p.relative_to(root)): sha256_file(p) for p in sorted(sources)})
 
 
-def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, executor=None):
+def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, executor=None,
+                 backend_resolver=None):
     if stop_after not in {'doctor', 'prepare', 'plan', 'auto'}:
         raise ValueError('invalid workflow stage')
     config = load_config(Path(config_path))
@@ -62,6 +64,27 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     if stop_after == 'prepare':
         return {'command': stop_after, 'status': 'PASS', 'result_dir': str(root), 'requests': index['count']}
     plan = create_search_plan(config, model, workload, env, root)
+    if model.raw.get('is_moe'):
+        print(json.dumps({'event': 'backend_resolution_start',
+                          'candidates': len(plan.candidates)}), flush=True)
+        image = env.image.to_dict() if hasattr(env.image, 'to_dict') else dict(env.image)
+        if backend_resolver is not None:
+            resolutions = backend_resolver(plan, config, root)
+            source = 'injected resolver'
+        elif image.get('image_id'):
+            resolutions = resolve_in_image(plan, config, root)
+            source = 'configured Docker image'
+        else:
+            resolutions = {}
+            source = 'unavailable: image identity missing from environment probe'
+        plan = apply_backend_resolution(plan, resolutions, source=source)
+        write_json_atomic(root / 'backend-resolution.json', plan.metadata['backend_resolution'])
+        print(json.dumps({'event': 'backend_resolution_done',
+                          'resolved': sum(row.get('status') == 'resolved'
+                                          for row in resolutions.values()),
+                          'removed_auto_duplicates': len(
+                              plan.metadata['backend_resolution']['removed_auto_duplicates']),
+                          'candidates': len(plan.candidates)}), flush=True)
     plan.metadata['configuration'] = configuration
     plan.metadata['bundle_fingerprint'] = _bundle_fingerprint()
     plan.metadata['index_fingerprint'] = sha256_file(root / 'data' / 'replay_index.json')
