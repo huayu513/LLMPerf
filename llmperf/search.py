@@ -61,12 +61,11 @@ def _candidate_backend(candidate):
 
 
 def _is_startup_failure(result):
-    """Whether a failed result is safe to use for backend quarantine.
+    """Whether a failed result should be classified as a startup failure.
 
-    The normalized runtime result carries ``failure_phase`` when native
-    evidence can distinguish startup/configuration failure from replay/load
-    failure.  The explicit reason fallback keeps injected executors and older
-    cached result documents compatible.
+    Backend quarantine uses the narrower ``_is_backend_incompatibility``
+    predicate below.  This broader classification is retained for candidate
+    state and diagnostics.
     """
 
     if not isinstance(result, dict):
@@ -95,6 +94,21 @@ def _is_startup_failure(result):
         "resolved_parameters_missing",
     }
     return any(reason in startup_markers for reason in reasons)
+
+
+def _is_backend_incompatibility(result, candidate):
+    """Return whether evidence proves an explicit runner is unsupported.
+
+    A startup failure is deliberately *not* enough to quarantine a backend:
+    readiness timeouts, missing artifacts, topology-specific parameter
+    mismatches, and model-load failures can all be local to one candidate.
+    The runtime adapter emits ``backend_unsupported`` only when a ready server
+    returned parameter evidence showing that the requested explicit MoE runner
+    is unsupported.  Keep the candidate check here as a second guard so an
+    accidentally broad result cannot quarantine AUTO or another runner.
+    """
+    backend = _candidate_backend(candidate)
+    return backend is not None and result.get("backend_unsupported") is True
 
 
 def _next_concurrency(current, maximum):
@@ -217,6 +231,14 @@ def execute_search(plan, run_root, executor=None, resume=False):
             state[key] = {}
         if not isinstance(state[key], dict):
             raise ValueError(f'search-state {key} must be an object')
+    # Drop quarantine records from older controllers.  They were based on
+    # broad startup heuristics and must not silently skip candidates after the
+    # evidence contract has been narrowed to explicit backend incompatibility.
+    state['backend_blocks'] = {
+        backend: block
+        for backend, block in state['backend_blocks'].items()
+        if isinstance(block, dict) and block.get('backend_unsupported') is True
+    }
     write_json_atomic(state_path, state)
     metadata = copy.deepcopy(plan.metadata)
     from .adapters import _effective_chat_template_kwargs
@@ -281,6 +303,8 @@ def execute_search(plan, run_root, executor=None, resume=False):
                 'backend': backend,
                 'candidate_id': candidate_id,
                 'task_id': task.id,
+                'backend_unsupported': True,
+                'scope': 'explicit_backend_unsupported',
                 'reasons': list(result.get('reasons', ())),
                 'failure_phase': result.get('failure_phase', 'startup'),
                 'plan_order': candidate_order.get(candidate_id),
@@ -301,7 +325,12 @@ def execute_search(plan, run_root, executor=None, resume=False):
                      or candidate_state.get('has_valid_measurement') is True)):
             return backend, None
         block = state['backend_blocks'].get(backend)
-        if not isinstance(block, dict) or block.get('candidate_id') == candidate_id:
+        # Blocks written by older controllers were based on broad startup
+        # heuristics and are not safe to reuse after the evidence contract was
+        # narrowed.  Require the explicit marker introduced above.
+        if (not isinstance(block, dict)
+                or block.get('backend_unsupported') is not True
+                or block.get('candidate_id') == candidate_id):
             return backend, None
         return backend, block
 
@@ -334,13 +363,13 @@ def execute_search(plan, run_root, executor=None, resume=False):
                 concurrency=task.concurrency,
                 backend=candidate_backend(candidate_id),
             )
-            if _is_startup_failure(result):
+            if _is_backend_incompatibility(result, candidates.get(candidate_id, {})):
                 block = backend_block(candidate_id, task, result)
                 if block is not None:
                     decision = {
                         'candidate': candidate_id,
                         'backend': block['backend'],
-                        'reason': 'backend_blocked_after_startup_failure',
+                        'reason': 'backend_blocked_after_explicit_unsupported_evidence',
                         'blocked_by_task': task.id,
                     }
                     if decision not in decisions:

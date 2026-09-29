@@ -383,13 +383,14 @@ def _failure_phase(
     summary: Mapping[str, Any] | None,
     evidence: Mapping[str, Any] | None,
 ) -> str | None:
-    """Classify failures before search applies backend quarantine.
+    """Classify failures before search records candidate state.
 
     A replay can fail after a healthy server has started (for example because
     an individual request failed or the load caused an OOM).  Those failures
     must stop only the current candidate branch.  Missing readiness/evidence
     is the stronger signal that the requested server configuration itself did
-    not start, so only that phase is eligible to block a backend.
+    not start.  Backend quarantine is handled separately and requires explicit
+    runner incompatibility evidence.
     """
 
     if status == "UNSUPPORTED" or any(reason in _STARTUP_FAILURE_REASONS for reason in reasons):
@@ -802,6 +803,10 @@ def read_attempt(
         "status": "INCONCLUSIVE",
         "reasons": [],
         "output_tokens_per_second": 0.0,
+        # This is intentionally narrower than ``failure_phase=startup``.
+        # Only explicit parameter evidence for an explicit MoE runner may
+        # quarantine that runner for later candidates.
+        "backend_unsupported": False,
         "summary_path": str(summary_path) if summary_path is not None else None,
         "candidate_id": task.candidate_id,
         "concurrency": task.concurrency,
@@ -857,6 +862,31 @@ def read_attempt(
             reasons.append("unsupported_server_parameters")
         if mismatched or computed_mismatched:
             reasons.append("server_parameter_mismatch")
+
+        # A missing readiness/evidence artifact is not proof that a runner is
+        # unsupported: it can be a timeout, an OOM, or a topology-specific
+        # launch problem.  Quarantine is allowed only when a ready server's
+        # captured parameter evidence explicitly marks the requested runner
+        # field unsupported.  AUTO is deliberately excluded because it has no
+        # concrete backend to quarantine.
+        unsupported_keys = {
+            _normalized_key(key)
+            for key in (*tuple(unsupported or ()), *tuple(computed_unsupported))
+        }
+        requested_backend = requested.get("backend") if requested is not None else None
+        explicit_backend = (
+            isinstance(requested_backend, str)
+            and requested_backend.strip().lower() not in {"", "auto", "none"}
+        )
+        result["backend_unsupported"] = bool(
+            evidence.get("readiness") is True
+            and evidence.get("server_info_captured") is True
+            and explicit_backend
+            and (
+                evidence.get("backend_unsupported") is True
+                or bool({"backend", "moe_runner_backend", "moe_runner"} & unsupported_keys)
+            )
+        )
         if evidence.get("resolved") is not True and not unsupported and not mismatched:
             reasons.append("resolved_parameters_missing")
         # Derive exported values from the native server information, rather

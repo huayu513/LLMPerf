@@ -454,6 +454,13 @@ for key, expected in requested.items():
     }
 
 resolved = captured == "1" and not unsupported and not mismatched
+requested_backend = requested.get("backend") if isinstance(requested, dict) else None
+backend_unsupported = (
+    captured == "1"
+    and isinstance(requested_backend, str)
+    and requested_backend.strip().lower() not in {"", "auto", "none"}
+    and "backend" in unsupported
+)
 evidence = {
     "readiness": True,
     "server_info_captured": captured == "1",
@@ -463,6 +470,7 @@ evidence = {
     "parameter_checks": checks,
     "unsupported_parameters": unsupported,
     "mismatched_parameters": mismatched,
+    "backend_unsupported": backend_unsupported,
 }
 Path(evidence_path).write_text(
     json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
