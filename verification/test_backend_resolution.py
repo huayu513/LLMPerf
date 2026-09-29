@@ -56,6 +56,18 @@ class BackendResolutionTests(unittest.TestCase):
         }, source='test image')
         self.assertEqual(len(different.candidates), 2)
 
+    def test_dedup_uses_stable_hash_when_full_probe_hash_contains_runtime_state(self):
+        plan = self.plan()
+        resolved = apply_backend_resolution(plan, {
+            'auto': {'status': 'resolved', 'effective_backend': 'flashinfer_mxfp4',
+                     'effective_config_sha256': 'a' * 64,
+                     'effective_config_comparison_sha256': 'c' * 64},
+            'flash': {'status': 'resolved', 'effective_backend': 'flashinfer_mxfp4',
+                      'effective_config_sha256': 'b' * 64,
+                      'effective_config_comparison_sha256': 'c' * 64},
+        }, source='test image')
+        self.assertEqual([candidate.id for candidate in resolved.candidates], ['flash'])
+
     def test_auto_resolution_adds_missing_explicit_backend_then_deduplicates(self):
         original = self.plan()
         auto = original.candidates[0]
@@ -137,6 +149,7 @@ def prepare_server_args(argv):
             result = json.loads(line.split('=', 1)[1])
             self.assertEqual(result['status'], 'resolved')
             self.assertEqual(result['effective_backend'], 'flashinfer_mxfp4')
+            self.assertEqual(len(result['effective_config_comparison_sha256']), 64)
 
     def test_partial_probe_output_keeps_completed_results(self):
         output = ('S1SLOW_RESOLVE_CASE_JSON=' + json.dumps({

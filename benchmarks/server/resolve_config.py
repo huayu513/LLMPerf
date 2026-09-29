@@ -20,6 +20,29 @@ PREFIX = 'S1SLOW_RESOLVE_JSON='
 BATCH_PREFIX = 'S1SLOW_RESOLVE_BATCH_JSON='
 CASE_PREFIX = 'S1SLOW_RESOLVE_CASE_JSON='
 
+# ``resolved_dict`` is also used as a server-info payload and contains process
+# wiring chosen while constructing a server. Those values are intentionally
+# different for every probe and are not part of backend equivalence.
+_VOLATILE_FIELDS = {
+    'random_seed', 'nccl_port', 'dist_init_addr', 'gated_launch_port',
+    'tokenizer_ipc_name', 'scheduler_input_ipc_name', 'detokenizer_ipc_name',
+    'rpc_ipc_name', 'metrics_ipc_name', 'tokenizer_worker_ipc_name',
+    'decoupled_spec_ipc_config', 'load_collector_ipc_name', 'instance_id',
+}
+
+
+def _comparison_projection(value):
+    """Drop process wiring while retaining all resolved launch decisions."""
+    if isinstance(value, dict):
+        return {
+            key: _comparison_projection(item)
+            for key, item in value.items()
+            if key not in _VOLATILE_FIELDS and not key.endswith('_ipc_name')
+        }
+    if isinstance(value, list):
+        return [_comparison_projection(item) for item in value]
+    return value
+
 
 def _resolve_one(case: dict) -> dict:
     case_env = {**os.environ, **case['env']}
@@ -44,6 +67,9 @@ def _resolve_one(case: dict) -> dict:
     server_args.resolve_once()
     effective = server_args.resolved_dict()
     canonical = json.dumps(effective, sort_keys=True, separators=(',', ':'), default=str)
+    comparison = _comparison_projection(effective)
+    comparison_canonical = json.dumps(comparison, sort_keys=True,
+                                      separators=(',', ':'), default=str)
     backend = effective.get('moe_runner_backend')
     if not isinstance(backend, str) or backend in ('', 'auto'):
         return {'status': 'unresolved', 'reason': 'SGLang did not resolve a concrete MoE backend'}
@@ -51,6 +77,8 @@ def _resolve_one(case: dict) -> dict:
         'status': 'resolved',
         'effective_backend': backend,
         'effective_config_sha256': hashlib.sha256(canonical.encode()).hexdigest(),
+        'effective_config_comparison_sha256': hashlib.sha256(
+            comparison_canonical.encode()).hexdigest(),
     }
 
 
