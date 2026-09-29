@@ -372,6 +372,12 @@ def main() -> int:
                 "mismatched_parameters": mismatched,
                 "parameter_checks": checks,
                 "resolved": captured and not unsupported and not mismatched,
+                "backend_unsupported": (
+                    isinstance(requested.get("backend"), str)
+                    and requested["backend"].strip().lower() not in {"", "auto", "none"}
+                    and captured
+                    and "backend" in unsupported
+                ),
             })
             if root_requested is None:
                 root_requested = requested
@@ -389,6 +395,9 @@ def main() -> int:
             "requested_server_parameters": root_requested,
             "unsupported_parameters": sorted(set(unsupported_all)),
             "mismatched_parameters": sorted(set(mismatched_all)),
+            "backend_unsupported": any(
+                item.get("backend_unsupported") is True for item in instance_evidence
+            ),
             "instances": instance_evidence,
         }
         atomic_json(results_root / "server.evidence.json", evidence)
