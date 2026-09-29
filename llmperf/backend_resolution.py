@@ -82,7 +82,11 @@ def apply_backend_resolution(plan: Plan, results: dict, *, source: str,
         result = results.get(candidate.id, {})
         if result.get('status') != 'resolved':
             continue
-        effective_hash = result.get('effective_config_sha256')
+        # The full hash is retained in the artifact for audit. Equivalence
+        # uses the resolver's stable projection, which excludes process-local
+        # ports/IPC names/instance IDs from ``resolved_dict``.
+        effective_hash = (result.get('effective_config_comparison_sha256')
+                          or result.get('effective_config_sha256'))
         if not isinstance(effective_hash, str) or len(effective_hash) != 64:
             continue
         context = fingerprint({key: value for key, value in candidate.static_config.items()
