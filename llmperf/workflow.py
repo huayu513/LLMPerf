@@ -118,6 +118,16 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
     plan = load_plan(path)
     metadata = plan.metadata
     root = path.parent
+    if metadata.get('workflow_mode') == 'tune':
+        lock_path = root / 'plan-lock.json'
+        try:
+            locked = json.loads(lock_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise ConfigError('intelligent tuning plan has no valid lock; generate a new plan') from exc
+        if locked.get('sha256') != sha256_file(path):
+            raise ConfigError('intelligent tuning plan changed since planning; generate a new plan')
+        if not metadata.get('baseline_candidate_id') or not metadata.get('planning'):
+            raise ConfigError('legacy intelligent tuning plan cannot use the unified search; generate a new plan')
     if root != Path(metadata['results_host']).resolve():
         raise ConfigError('plan was moved away from its recorded result directory; generate a new plan')
     source = Path(metadata['jsonl_host'])
@@ -154,5 +164,9 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
             raise ConfigError('engine environment changed since planning; generate a new plan')
     if now.get('docker', {}).get('facts', {}).get('driver') != previous.get('docker', {}).get('facts', {}).get('driver'):
         raise ConfigError('GPU driver changed since planning; generate a new plan')
-    report = execute_search(plan, root, executor=executor, resume=resume)
+    if metadata.get('workflow_mode') == 'tune':
+        from .tuning import execute_tuning_plan
+        report = execute_tuning_plan(plan, root, executor=executor, resume=resume)
+    else:
+        report = execute_search(plan, root, executor=executor, resume=resume)
     return {**report, 'result_dir': str(root)}
