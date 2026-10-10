@@ -247,7 +247,7 @@ def validate_scenario(value: Any) -> dict[str, Any]:
 
 def validate_advisor(value: Any) -> dict[str, Any]:
     data = _object(value, "advisor")
-    _unknown(data, {"base_url", "model", "api_key_env", "timeout_seconds"}, "advisor")
+    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds"}, "advisor")
     url = _string(data.get("base_url"), "advisor.base_url").rstrip("/")
     try:
         parts = urlsplit(url)
@@ -261,6 +261,8 @@ def validate_advisor(value: Any) -> dict[str, Any]:
     return {
         "base_url": url,
         "model": _string(data.get("model"), "advisor.model"),
+        "model_pool": _string(data.get("model_pool", ""), "advisor.model_pool", nonempty=False),
+        "authorization": _string(data.get("authorization", ""), "advisor.authorization", nonempty=False),
         "api_key_env": _string(data.get("api_key_env", ""), "advisor.api_key_env", nonempty=False),
         "timeout_seconds": _number(data.get("timeout_seconds", 60), "advisor.timeout_seconds", 0, strict=True),
     }

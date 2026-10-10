@@ -49,7 +49,8 @@ class LocalAdvisor:
                 "You are a SGLang configuration advisor. Return JSON only: "
                 "{\"candidates\":[{\"base_id\":\"catalog id\",\"params\":{...},"
                 "\"reason\":\"short Chinese reason\"}]}. Select only base_id values and "
-                "parameter values allowed by the supplied catalog. Prefer diverse experiments. "
+                "parameter values allowed by the supplied catalog. Return exactly one candidate "
+                "with a reason of at most 8 Chinese characters. Prefer a new experiment. "
                 "Do not issue commands, alter the workload, or claim a winner."
             ),
             "explain": (
@@ -61,20 +62,29 @@ class LocalAdvisor:
             raise ValueError(f"unknown advisor task: {task}")
         body = json.dumps({
             "model": self.settings["model"],
-            "temperature": 0,
-            "max_tokens": 1200,
             "messages": [
-                {"role": "system", "content": instructions[task]},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                {"role": "user", "content": instructions[task] + "\n\n" +
+                 json.dumps(payload, ensure_ascii=False)},
             ],
+            "reasoning_effort": "none",
+            "chat_template_kwargs": {"thinking": False},
+            "max_tokens": 64,
+            "temperature": 0,
+            "stream": False,
         }, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
-        key_env = self.settings.get("api_key_env")
-        if key_env:
-            key = os.environ.get(key_env)
-            if not key:
-                raise ConfigError(f"advisor API key environment variable is missing: {key_env}")
-            headers["Authorization"] = f"Bearer {key}"
+        if self.settings.get("model_pool"):
+            headers["X-Model-Pool"] = self.settings["model_pool"]
+        authorization = self.settings.get("authorization")
+        if authorization:
+            headers["Authorization"] = authorization
+        else:
+            key_env = self.settings.get("api_key_env")
+            if key_env:
+                key = os.environ.get(key_env)
+                if not key:
+                    raise ConfigError(f"advisor API key environment variable is missing: {key_env}")
+                headers["Authorization"] = f"Bearer {key}"
         request = urllib.request.Request(url, body, headers=headers, method="POST")
         try:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

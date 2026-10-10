@@ -50,7 +50,8 @@ class TuningTests(unittest.TestCase):
         self.config.write_text(json.dumps({
             "model_path": "model", "image": "repo/engine@sha256:" + "a" * 64,
             "output_dir": "results",
-            "advisor": {"base_url": "http://127.0.0.1:9000/v1", "model": "local"},
+            "advisor": {"base_url": "http://127.0.0.1:9000/v1", "model": "local",
+                        "model_pool": "dsv41", "authorization": "Bearer test-token"},
             "search": {"max_trials": 10, "repetitions": 2},
         }))
 
@@ -68,16 +69,30 @@ class TuningTests(unittest.TestCase):
             def open(self, request, timeout):
                 captured["url"] = request.full_url
                 captured["body"] = json.loads(request.data)
+                captured["headers"] = {key.lower(): value for key, value in request.header_items()}
                 captured["timeout"] = timeout
                 return io.BytesIO(json.dumps({"choices": [{"message": {"content":
                     json.dumps({"scenario": SCENE})}}]}).encode())
-        with patch("llmperf.advisor.urllib.request.build_opener", return_value=Opener()):
-            reply = LocalAdvisor({"base_url": "http://127.0.0.1:9000/v1",
-                                  "model": "local", "timeout_seconds": 5}).ask(
+        with patch("llmperf.advisor.urllib.request.build_opener", return_value=Opener()), \
+             patch.dict("os.environ", {"LLMPERF_ADVISOR_KEY": "test-token"}):
+            reply = LocalAdvisor({"base_url": "http://10.64.39.63:54321/v1/chat/completions",
+                                  "model": "s1-model", "model_pool": "dsv41",
+                                  "api_key_env": "LLMPERF_ADVISOR_KEY",
+                                  "timeout_seconds": 5}).ask(
                                       "scene", {"description": "输入 8K"})
         self.assertEqual(reply["scenario"], SCENE)
-        self.assertEqual(captured["url"], "http://127.0.0.1:9000/v1/chat/completions")
-        self.assertEqual(captured["body"]["model"], "local")
+        self.assertEqual(captured["url"], "http://10.64.39.63:54321/v1/chat/completions")
+        self.assertEqual(captured["headers"]["authorization"], "Bearer test-token")
+        self.assertEqual(captured["headers"]["content-type"], "application/json")
+        self.assertEqual(captured["headers"]["x-model-pool"], "dsv41")
+        self.assertEqual(captured["body"]["model"], "s1-model")
+        self.assertEqual(captured["body"]["reasoning_effort"], "none")
+        self.assertEqual(captured["body"]["chat_template_kwargs"], {"thinking": False})
+        self.assertEqual(captured["body"]["max_tokens"], 64)
+        self.assertEqual(captured["body"]["temperature"], 0)
+        self.assertIs(captured["body"]["stream"], False)
+        self.assertEqual(len(captured["body"]["messages"]), 1)
+        self.assertEqual(captured["body"]["messages"][0]["role"], "user")
         self.assertEqual(captured["timeout"], 5)
 
     def test_question_does_not_change_config(self):
@@ -88,6 +103,19 @@ class TuningTests(unittest.TestCase):
         result = extract_and_save_scenario(self.config, "输入 8K", advisor=Question())
         self.assertEqual(result["status"], "NEEDS_INPUT")
         self.assertEqual(self.config.read_bytes(), before)
+
+    def test_explicit_authorization_is_sent(self):
+        captured = {}
+        class Opener:
+            def open(self, request, timeout):
+                captured.update({key.lower(): value for key, value in request.header_items()})
+                return io.BytesIO(json.dumps({"choices": [{"message": {"content":
+                    json.dumps({"scenario": SCENE})}}]}).encode())
+        settings = load_config(self.config, tuning=True).advisor
+        with patch("llmperf.advisor.urllib.request.build_opener", return_value=Opener()):
+            LocalAdvisor(settings).ask("scene", {"description": "输入 8K"})
+        self.assertEqual(captured["authorization"], "Bearer test-token")
+        self.assertEqual(captured["x-model-pool"], "dsv41")
 
     def test_generated_workload_is_fixed_and_valid(self):
         path = self.root / "input.jsonl"
@@ -130,6 +158,7 @@ class TuningTests(unittest.TestCase):
         self.assertLessEqual(len(tasks), 10)
         run = Path(report["result_dir"])
         self.assertTrue((run / "catalog.json").is_file())
+        self.assertNotIn("test-token", (run / "plan.json").read_text())
         self.assertTrue((run / "results-index.json").is_file())
         self.assertEqual(report["comparison"]["metric"], "latency_seconds.p95")
         task_count = len(tasks)
