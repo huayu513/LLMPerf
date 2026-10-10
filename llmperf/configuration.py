@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ class SearchConfig:
 @dataclass(frozen=True)
 class RunConfig:
     model_path: Path
-    input_path: Path
+    input_path: Path | None
     image: str
     output_dir: Path | None = None
     gpu_indexes: tuple[int, ...] | None = None
@@ -40,13 +41,15 @@ class RunConfig:
     ready_timeout: int = 3600
     model_overrides: dict[str, Any] = field(default_factory=dict)
     docker: DockerConfig = field(default_factory=DockerConfig)
+    scenario: dict[str, Any] | None = None
+    advisor: dict[str, Any] | None = None
     source_path: Path = Path()
 
 
 _TOP_KEYS = {
     "model_path", "input_path", "image", "output_dir", "gpu_indexes",
     "search", "smoke", "warmup", "request_timeout", "ready_timeout",
-    "model_overrides", "docker",
+    "model_overrides", "docker", "scenario", "advisor",
 }
 _SEARCH_KEYS = {
     "concurrency_max", "start_concurrency", "explore_request_limit",
@@ -223,21 +226,62 @@ def _docker(value: Any, image: str, label: str) -> DockerConfig:
     return config
 
 
-def load_config(path: Path) -> RunConfig:
+def validate_scenario(value: Any) -> dict[str, Any]:
+    data = _object(value, "scenario")
+    allowed = {"max_input_tokens", "max_output_tokens", "target_concurrency", "priority"}
+    _unknown(data, allowed, "scenario")
+    result = {
+        "max_input_tokens": _integer(data.get("max_input_tokens"), "scenario.max_input_tokens", 1),
+        "max_output_tokens": _integer(data.get("max_output_tokens"), "scenario.max_output_tokens", 1),
+        "target_concurrency": _integer(data.get("target_concurrency"), "scenario.target_concurrency", 1),
+        "priority": _string(data.get("priority"), "scenario.priority"),
+    }
+    if result["priority"] not in {"latency", "throughput"}:
+        raise ConfigError("scenario.priority must be latency or throughput")
+    for key, maximum in (("max_input_tokens", 131072), ("max_output_tokens", 65536),
+                         ("target_concurrency", 1024)):
+        if result[key] > maximum:
+            raise ConfigError(f"scenario.{key} must be <= {maximum}")
+    return result
+
+
+def validate_advisor(value: Any) -> dict[str, Any]:
+    data = _object(value, "advisor")
+    _unknown(data, {"base_url", "model", "api_key_env", "timeout_seconds"}, "advisor")
+    url = _string(data.get("base_url"), "advisor.base_url").rstrip("/")
+    try:
+        parts = urlsplit(url)
+        valid = (parts.scheme in {"http", "https"} and bool(parts.hostname)
+                 and parts.port != 0 and not parts.username and not parts.password
+                 and not parts.query and not parts.fragment)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ConfigError("advisor.base_url must be an HTTP(S) endpoint without credentials or query")
+    return {
+        "base_url": url,
+        "model": _string(data.get("model"), "advisor.model"),
+        "api_key_env": _string(data.get("api_key_env", ""), "advisor.api_key_env", nonempty=False),
+        "timeout_seconds": _number(data.get("timeout_seconds", 60), "advisor.timeout_seconds", 0, strict=True),
+    }
+
+
+def load_config(path: Path, *, tuning: bool = False) -> RunConfig:
     """Load and validate one JSON run configuration."""
     source_path = Path(path).expanduser().resolve()
     data = _read(source_path)
     _unknown(data, _TOP_KEYS, str(source_path))
-    for required in ("model_path", "input_path", "image"):
+    for required in (("model_path", "image") if tuning else ("model_path", "input_path", "image")):
         if required not in data:
             raise ConfigError(f"{source_path}: missing required field {required}")
 
     base = source_path.parent
     model_path = _path(data["model_path"], base, f"{source_path}: model_path")
-    input_path = _path(data["input_path"], base, f"{source_path}: input_path")
+    input_path = (_path(data["input_path"], base, f"{source_path}: input_path")
+                  if data.get("input_path") is not None else None)
     if not model_path.is_dir():
         raise ConfigError(f"model_path is not a directory: {model_path}")
-    if not input_path.is_file():
+    if input_path is not None and not input_path.is_file():
         raise ConfigError(f"input_path is not a file: {input_path}")
     image = _string(data["image"], f"{source_path}: image")
     try:
@@ -263,6 +307,8 @@ def load_config(path: Path) -> RunConfig:
             raise ConfigError(f"{source_path}: gpu_indexes must be unique")
 
     overrides = _object(data.get("model_overrides", {}), f"{source_path}: model_overrides")
+    scenario = validate_scenario(data["scenario"]) if "scenario" in data else None
+    advisor = validate_advisor(data["advisor"]) if "advisor" in data else None
     return RunConfig(
         model_path=model_path,
         input_path=input_path,
@@ -281,5 +327,7 @@ def load_config(path: Path) -> RunConfig:
         ),
         model_overrides=dict(overrides),
         docker=_docker(data.get("docker", {}), image, f"{source_path}: docker"),
+        scenario=scenario,
+        advisor=advisor,
         source_path=source_path,
     )

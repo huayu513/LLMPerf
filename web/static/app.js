@@ -12,7 +12,9 @@ var state = {
   currentArtifactPath: null,
   jobs: [],
   selectedJobId: null,
-  selectedTrial: null
+  selectedTrial: null,
+  sceneDraft: "",
+  sceneConfigPath: ""
 };
 
 function el(id) {
@@ -275,9 +277,10 @@ async function selectRun(runId, options) {
   renderCandidates();
   renderTrials();
   renderArtifacts();
-  el("run-plan").disabled = false;
+  var isTune = (state.runDetail.summary || {}).workflow_mode === "tune";
+  el("run-plan").disabled = isTune;
   el("resume-run").disabled = false;
-  el("adopt-runtime").disabled = false;
+  el("adopt-runtime").disabled = isTune;
   el("collect-run").disabled = false;
 }
 
@@ -292,6 +295,7 @@ function renderSummary() {
   el("summary-content").className = "";
   el("summary-content").innerHTML = renderKV([
     ["Run", summary.id],
+    ["模式", summary.workflow_mode],
     ["状态", summary.status],
     ["路径", summary.path],
     ["候选数", summary.candidate_count],
@@ -302,6 +306,11 @@ function renderSummary() {
     ["Best candidate", best && best.candidate_id],
     ["Best concurrency", best && best.concurrency],
     ["Best output tok/s", best && best.output_tokens_per_second],
+    ["场景", bestDoc.scenario],
+    ["选优指标", bestDoc.comparison && bestDoc.comparison.metric],
+    ["复验指标值", best && best.metric_value],
+    ["基线复验值", bestDoc.comparison && bestDoc.comparison.baseline_validated && bestDoc.comparison.baseline_validated.metric_value],
+    ["调优说明", bestDoc.summary],
     ["有效 trial", validRows.length],
     ["代码指纹一致", code.matches],
     ["当前代码 fingerprint", code.current_bundle_fingerprint]
@@ -586,6 +595,43 @@ async function autoRun() {
   await createJob("/api/jobs/auto", { config_path: state.configPath });
 }
 
+async function parseScenario() {
+  state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
+  var description = el("scenario-description").value.trim();
+  if (!description) throw new Error("请先描述输入/输出最大 token、业务并发和优先目标");
+  if (state.sceneConfigPath !== state.configPath) state.sceneDraft = "";
+  var combined = state.sceneDraft ? state.sceneDraft + "\n补充信息：" + description : description;
+  el("scenario-response").textContent = "正在调用本地大模型解析场景…";
+  var result = await api("/api/scenario/parse", {
+    method: "POST", body: { config_path: state.configPath, description: combined }
+  });
+  if (result.status === "NEEDS_INPUT") {
+    state.sceneDraft = combined;
+    state.sceneConfigPath = state.configPath;
+    el("scenario-description").value = "";
+    el("scenario-description").placeholder = result.question;
+  } else {
+    state.sceneDraft = "";
+    state.sceneConfigPath = "";
+  }
+  el("scenario-response").textContent = result.status === "NEEDS_INPUT"
+    ? "请补充：" + result.question
+    : "已写入 experiment.json：" + JSON.stringify(result.scenario);
+}
+
+function resetScenario() {
+  state.sceneDraft = "";
+  state.sceneConfigPath = "";
+  el("scenario-description").value = "";
+  el("scenario-description").placeholder = "例如：输入最多 8K token，输出最多 2K token，业务并发约 32，时延优先。";
+  el("scenario-response").textContent = "请重新描述场景。";
+}
+
+async function tuneRun() {
+  state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
+  await createJob("/api/jobs/tune", { config_path: state.configPath });
+}
+
 async function startSavedPlan(resume) {
   await createJob(runPath(resume ? "/resume" : "/run"), {});
 }
@@ -647,6 +693,9 @@ function bindEvents() {
   el("refresh-runs").addEventListener("click", function() { loadRuns().catch(showError); });
   el("plan-run").addEventListener("click", function() { planRun().catch(showError); });
   el("auto-run").addEventListener("click", function() { autoRun().catch(showError); });
+  el("parse-scenario").addEventListener("click", function() { parseScenario().catch(showError); });
+  el("reset-scenario").addEventListener("click", resetScenario);
+  el("tune-run").addEventListener("click", function() { tuneRun().catch(showError); });
   el("run-plan").addEventListener("click", function() { startSavedPlan(false).catch(showError); });
   el("resume-run").addEventListener("click", function() { startSavedPlan(true).catch(showError); });
   el("collect-run").addEventListener("click", function() { collectRun().catch(showError); });

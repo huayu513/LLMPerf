@@ -132,6 +132,24 @@ main {
   font-size: 13px;
 }
 
+.scenario-input {
+  grid-column: 1 / 3;
+}
+
+.scenario-input textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font: inherit;
+}
+
+.scenario-actions {
+  align-self: end;
+}
+
 .button-row {
   display: flex;
   gap: 8px;
@@ -467,6 +485,11 @@ pre {
   .summary-grid,
   .detail-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scenario-input,
+  .controls .hint {
+    grid-column: 1;
   }
 
   .sidebar {
