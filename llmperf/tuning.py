@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import math
 import statistics
@@ -21,7 +22,7 @@ from .configuration import load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .errors import ConfigError
-from .planner import create_search_plan, fingerprint, plan_to_dict
+from .planner import _jsonable, create_search_plan, fingerprint, plan_to_dict, write_plan
 from .scene_workload import create_scene_workload
 from .search import collect_results
 from .types import CandidateConfig, Plan, PlanTask
@@ -238,10 +239,7 @@ def _prepare_new_run(config_path: Path, *, use_captured: bool, probe,
         "scene_calibration": calibration,
         "config_path": str(config_path),
         "configuration": {"model_path": str(config.model_path), "image": config.image,
-                          "gpu_indexes": config.gpu_indexes,
-                          "advisor": {key: value for key, value in config.advisor.items()
-                                      if key != "authorization"},
-                          "scenario": scene},
+                          "gpu_indexes": config.gpu_indexes, "scenario": scene},
         "bundle_fingerprint": _bundle_fingerprint(),
         "index_fingerprint": sha256_file(root / "data" / "replay_index.json"),
         "objective": f"best {scene['priority']} at concurrency {scene['target_concurrency']}",
@@ -259,167 +257,161 @@ def _prepare_new_run(config_path: Path, *, use_captured: bool, probe,
     return root, plan, catalog
 
 
-def _save_view_plan(root: Path, template: Plan, state: dict) -> None:
-    candidates = tuple(CandidateConfig(**{**row, "gpu_indexes": tuple(row["gpu_indexes"]),
-                                          "reasons": tuple(row.get("reasons", ()))})
-                       for row in state["candidates"].values())
-    metadata = copy.deepcopy(template.metadata)
-    metadata["candidates"] = {c.id: asdict(c) for c in candidates}
-    write_json_atomic(root / "plan.json", plan_to_dict(Plan(root.name, candidates=candidates, metadata=metadata)))
 
-
-def run_tuning(config_path: str | Path, *, use_captured: bool = False,
-               resume_run: str | Path | None = None, probe=probe_environment,
-               advisor: LocalAdvisor | None = None, executor=None) -> dict:
+def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
+                probe=probe_environment, advisor: LocalAdvisor | None = None,
+                calibrate: bool = True) -> dict:
+    """Freeze a scene workload and all search candidates without benchmarking."""
     config_path = Path(config_path).expanduser().resolve()
     config = load_config(config_path, tuning=True)
+    source_hash = sha256_file(config_path)
     if config.scenario is None or config.advisor is None:
-        raise ConfigError("tune requires scenario and advisor in experiment.json")
-    if config.search.max_trials < 2 * config.search.repetitions + 2:
-        raise ConfigError("tune search.max_trials must reserve baseline and winner repeats plus two trials")
-    if resume_run is None:
-        root, template, catalog = _prepare_new_run(config_path, use_captured=use_captured,
-                                                   probe=probe, calibrate=executor is None)
-        state = {"version": 1, "phase": "explore", "scenario_hash": fingerprint(config.scenario),
-                 "config_sha256": sha256_file(config_path),
-                 "workload_sha256": template.metadata["expected_source_sha256"],
-                 "bundle_fingerprint": template.metadata["bundle_fingerprint"],
-                 "candidates": {}, "pending": [], "trials": {}, "observations": [],
-                 "advisor_calls": [], "decisions": [], "elapsed_seconds": 0.0, "batch": 0}
-        write_json_atomic(root / "tune-state.json", state)
-        _save_view_plan(root, template, state)
-    else:
-        root = Path(resume_run).expanduser().resolve()
-        state = json.loads((root / "tune-state.json").read_text())
-        template_doc = json.loads((root / "plan.json").read_text())
-        template = Plan(root.name, metadata=template_doc["metadata"])
-        catalog = json.loads((root / "catalog.json").read_text())
-        if root != Path(template.metadata["results_host"]).resolve():
-            raise ConfigError("tune run moved away from its recorded result directory")
-        if state["scenario_hash"] != fingerprint(config.scenario):
-            raise ConfigError("scene changed since planning; start a new tune run")
-        if state["config_sha256"] != sha256_file(config_path):
-            raise ConfigError("experiment.json changed since planning; start a new tune run")
-        if state["bundle_fingerprint"] != _bundle_fingerprint():
-            raise ConfigError("benchmark runtime changed since planning; start a new tune run")
-        if sha256_file(Path(template.metadata["jsonl_host"])) != state["workload_sha256"]:
-            raise ConfigError("workload changed since planning; start a new tune run")
-        if sha256_file(Path(template.metadata["index_host"])) != template.metadata["index_fingerprint"]:
-            raise ConfigError("replay index changed since planning")
-        model = discover_model(config.model_path, config.model_overrides)
-        if fingerprint(asdict(model)) != template.metadata["model_fingerprint"]:
-            raise ConfigError("model metadata or weight inventory changed since planning")
-        source = Path(template.metadata["jsonl_host"])
-        current = probe(_probe_config(replace(config, input_path=source), root))
-        if current.status == "FAIL":
-            raise ConfigError("current environment checks failed; cannot resume tune")
-        previous = template.metadata["environment"]
-        now = current.to_dict()
-        selected = {i for row in catalog["base_candidates"] for i in row["gpu_indexes"]}
-        def devices(snapshot):
-            return [{k: gpu.get(k) for k in ("index", "name", "uuid", "compute_capability", "memory_total_mb", "mig_mode")}
-                    for gpu in snapshot["gpus"] if gpu["index"] in selected]
-        if (devices(now) != devices(previous)
-                or now.get("image", {}).get("image_id") != previous.get("image", {}).get("image_id")
-                or now.get("container", {}).get("capabilities") != previous.get("container", {}).get("capabilities")
-                or now.get("container", {}).get("versions") != previous.get("container", {}).get("versions")
-                or now.get("docker", {}).get("facts", {}).get("driver") != previous.get("docker", {}).get("facts", {}).get("driver")):
-            raise ConfigError("GPU, image, engine or driver changed since planning")
-        if state.get("phase") in {"complete", "inconclusive"} and (root / "best.json").is_file():
-            return json.loads((root / "best.json").read_text())
+        raise ConfigError("intelligent planning requires scenario and advisor in experiment.json")
+    reserve = 2 * config.search.repetitions
+    capacity = config.search.max_trials - reserve
+    if capacity < 2:
+        raise ConfigError("search.max_trials must allow two explorations plus winner and baseline repeats")
+    root, template, catalog = _prepare_new_run(config_path, use_captured=use_captured,
+                                                probe=probe, calibrate=calibrate)
+    if sha256_file(config_path) != source_hash:
+        raise ConfigError("experiment.json changed during intelligent planning; generate a new plan")
+    print(json.dumps({"event": "run_created", "result_dir": str(root)}), flush=True)
     scene = config.scenario
-    local_advisor = advisor or LocalAdvisor(config.advisor)
+    selected: dict[str, CandidateConfig] = {}
+    hashes: set[str] = set()
+    decisions: list[dict] = []
+    advisor_calls: list[dict] = []
+
+    def add(candidate: CandidateConfig) -> None:
+        if len(selected) < capacity and candidate.config_hash not in hashes:
+            selected[candidate.id] = candidate
+            hashes.add(candidate.config_hash)
+
+    baseline = catalog["base_candidates"][0]
+    add(CandidateConfig(**{**baseline, "gpu_indexes": tuple(baseline["gpu_indexes"]),
+                           "reasons": tuple(baseline.get("reasons", ())) }))
+    try:
+        reply = (advisor or LocalAdvisor(config.advisor)).ask("candidates", {
+            "scenario": scene, "catalog": _visible_catalog(catalog, 0),
+            "tested": [], "remaining_trials": capacity - 1,
+            "request_count": template.metadata["expected_request_count"],
+        })
+        rows = reply.get("candidates")
+        if not isinstance(rows, list) or len(rows) > 5:
+            raise ValueError("advisor must return at most 5 candidates")
+        accepted = 0
+        for row in rows:
+            try:
+                before = len(selected)
+                add(_from_suggestion(row, catalog))
+                accepted += len(selected) - before
+            except ValueError as exc:
+                decisions.append({"reason": "advisor_candidate_rejected", "detail": str(exc)})
+        advisor_calls.append({"task": "candidates", "status": "PASS", "accepted": accepted})
+    except (ConfigError, ValueError) as exc:
+        advisor_calls.append({"task": "candidates", "status": "FALLBACK", "reason": str(exc)})
+
+    # The rule catalog is materialized now, so execution cannot invent candidates.
+    for row in catalog["base_candidates"]:
+        add(CandidateConfig(**{**row, "gpu_indexes": tuple(row["gpu_indexes"]),
+                               "reasons": tuple(row.get("reasons", ())) }))
+    knob_items = list(catalog["knobs"].items())
+    for width in range(1, len(knob_items) + 1):
+        for subset in itertools.combinations(knob_items, width):
+            for values in itertools.product(*(options for _, options in subset)):
+                if len(selected) >= capacity:
+                    break
+                params = dict(zip((name for name, _ in subset), values))
+                for base in catalog["base_candidates"]:
+                    if len(selected) >= capacity:
+                        break
+                    if all(base["static_config"].get(key) == value
+                           for key, value in params.items()):
+                        continue
+                    add(_from_suggestion({"base_id": base["id"], "params": params,
+                                          "reason": "rule catalog"}, catalog))
+            if len(selected) >= capacity:
+                break
+        if len(selected) >= capacity:
+            break
+
+    source = Path(template.metadata["jsonl_host"])
+    effective_search = replace(config.search, concurrency_max=scene["target_concurrency"],
+                               start_concurrency=scene["target_concurrency"])
+    effective = replace(config, input_path=source, search=effective_search)
+    configuration = _jsonable(asdict(effective))
+    configuration.pop("advisor", None)
+    if sha256_file(config_path) != source_hash:
+        raise ConfigError("experiment.json changed during intelligent planning; generate a new plan")
+    template.metadata.update({
+        "configuration": configuration,
+        "config_sha256_at_planning": source_hash,
+        "candidate_source": "advisor_with_validated_rule_catalog",
+        "baseline_candidate_id": baseline["id"],
+        "planning": {"advisor_calls": advisor_calls, "decisions": decisions,
+                     "exploration_capacity": capacity, "planned_candidates": len(selected),
+                     "reserved_final_trials": reserve},
+        "candidates": {candidate.id: asdict(candidate) for candidate in selected.values()},
+    })
+    plan = Plan(root.name, candidates=tuple(selected.values()), metadata=template.metadata)
+    write_plan(root / "plan.json", plan)
+    write_json_atomic(root / "plan-lock.json", {"sha256": sha256_file(root / "plan.json")})
+    resolved_path = root / "resolved-config.json"
+    resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+    resolved["candidate_count"] = len(plan.candidates)
+    resolved["search_scope"] = template.metadata["search_scope"]
+    write_json_atomic(resolved_path, resolved)
+    return {"command": "tune-plan", "status": "PASS", "result_dir": str(root),
+            "plan": str(root / "plan.json"), "candidates": len(plan.candidates),
+            "requests": template.metadata["expected_request_count"],
+            "scenario": scene, "advisor_calls": advisor_calls}
+
+
+def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
+                        resume: bool = False) -> dict:
+    """Measure a saved scene plan. This path has no advisor or config-file dependency."""
+    if plan.metadata.get("workflow_mode") != "tune" or not plan.candidates:
+        raise ConfigError("saved plan is not a complete intelligent tuning plan")
+    root = Path(run_root)
+    identity = fingerprint(plan_to_dict(plan))
     state_path = root / "tune-state.json"
+    if state_path.exists():
+        if not resume:
+            raise FileExistsError("search already exists; use resume for this plan")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if state.get("plan_hash") != identity:
+            raise ConfigError("saved plan changed since tuning started")
+        if state.get("phase") in {"complete", "inconclusive"} and (root / "best.json").is_file():
+            return json.loads((root / "best.json").read_text(encoding="utf-8"))
+    else:
+        state = {"version": 2, "plan_hash": identity, "phase": "explore",
+                 "next_index": 0, "trials": {}, "observations": [], "decisions": [],
+                 "elapsed_seconds": 0.0, "stagnant_batches": 0}
+        write_json_atomic(state_path, state)
+    scene = plan.metadata["scenario"]
+    limits = plan.metadata["search"]
+    limit = int(limits["max_trials"])
+    repetitions = int(limits["repetitions"])
+    max_seconds = float(limits["max_seconds"])
+    target = scene["target_concurrency"]
+    candidates = {candidate.id: asdict(candidate) for candidate in plan.candidates}
+    candidate_ids = list(candidates)
+    baseline_id = plan.metadata["baseline_candidate_id"]
+    if baseline_id not in candidates:
+        raise ConfigError("plan baseline is missing from candidates")
     started = time.monotonic()
     previous_elapsed = float(state["elapsed_seconds"])
-    limit = config.search.max_trials
-    repetitions = config.search.repetitions
-    reserve = 2 * repetitions
-    target = scene["target_concurrency"]
 
-    def save():
+    def save() -> None:
         state["elapsed_seconds"] = previous_elapsed + time.monotonic() - started
         write_json_atomic(state_path, state)
-        _save_view_plan(root, template, state)
 
-    def used():
+    def elapsed() -> float:
+        return previous_elapsed + time.monotonic() - started
+
+    def used() -> int:
         return sum(1 for entries in state["trials"].values() for entry in entries
                    if entry.get("completed") is True)
-
-    def propose(first: bool):
-        visible = _visible_catalog(catalog, state["batch"])
-        prior = sorted(state["observations"],
-                       key=lambda row: row.get("score") if row.get("score") is not None else -math.inf,
-                       reverse=True)[:15]
-        prior = [{**row, "configuration": {
-            key: value for key, value in state["candidates"][row["candidate_id"]]["static_config"].items()
-            if key in {"tp", "dp", "pp", "dp_attention", "backend", "dspark",
-                       "mem_fraction_static", "chunked_prefill_size", "max_running_requests"}}}
-                 for row in prior]
-        payload = {"scenario": scene, "catalog": visible,
-                   "tested": prior, "remaining_trials": max(0, limit - used()),
-                   "request_count": template.metadata["expected_request_count"]}
-        suggestions = []
-        try:
-            reply = local_advisor.ask("candidates", payload)
-            rows = reply.get("candidates")
-            if not isinstance(rows, list) or len(rows) > 5:
-                raise ValueError("advisor must return at most 5 candidates")
-            for row in rows:
-                try:
-                    suggestions.append(_from_suggestion(row, catalog))
-                except ValueError as exc:
-                    state["decisions"].append({"reason": "advisor_candidate_rejected", "detail": str(exc)})
-            state["advisor_calls"].append({"batch": state["batch"], "status": "PASS",
-                                           "accepted": len(suggestions), "first": first})
-        except (ConfigError, ValueError) as exc:
-            state["advisor_calls"].append({"batch": state["batch"], "status": "FALLBACK",
-                                           "reason": str(exc), "first": first})
-        seen_hashes = {row["config_hash"] for row in state["candidates"].values()}
-        if first and not state["candidates"]:
-            baseline = catalog["base_candidates"][0]
-            state["candidates"][baseline["id"]] = baseline
-            state["pending"].append(baseline["id"])
-            seen_hashes.add(baseline["config_hash"])
-        for candidate in suggestions:
-            if candidate.config_hash not in seen_hashes:
-                state["candidates"][candidate.id] = asdict(candidate)
-                state["pending"].append(candidate.id)
-                seen_hashes.add(candidate.config_hash)
-        # Rule candidates guarantee progress when a small local model is slow,
-        # unavailable, or repeatedly suggests duplicates.
-        needed = max(0, 5 - len(state["pending"]))
-        for row in catalog["base_candidates"]:
-            if needed <= 0:
-                break
-            if row["config_hash"] in seen_hashes:
-                continue
-            state["candidates"][row["id"]] = row
-            state["pending"].append(row["id"])
-            seen_hashes.add(row["config_hash"])
-            needed -= 1
-        if needed:
-            for base in catalog["base_candidates"]:
-                for key, values in catalog["knobs"].items():
-                    for value in values:
-                        if needed <= 0:
-                            break
-                        if base["static_config"].get(key) == value:
-                            continue
-                        candidate = _from_suggestion({"base_id": base["id"],
-                            "params": {key: value}, "reason": "rule fallback"}, catalog)
-                        if candidate.config_hash in seen_hashes:
-                            continue
-                        state["candidates"][candidate.id] = asdict(candidate)
-                        state["pending"].append(candidate.id)
-                        seen_hashes.add(candidate.config_hash)
-                        needed -= 1
-                    if needed <= 0:
-                        break
-                if needed <= 0:
-                    break
-        state["batch"] += 1
-        save()
 
     def one_trial(candidate_id: str, run_class: str, suffix: str = "") -> dict:
         task_id = f"{candidate_id}-{run_class}-c{target}{suffix}"
@@ -428,17 +420,17 @@ def run_tuning(config_path: str | Path, *, use_captured: bool = False,
             if entry.get("completed"):
                 path = root / entry["manifest"]
                 if path.is_file() and sha256_file(path) == entry["sha256"]:
-                    return json.loads(path.read_text())
+                    return json.loads(path.read_text(encoding="utf-8"))
                 raise ConfigError(f"recorded trial evidence changed: {path}")
         attempt = len(entries) + 1
         task = PlanTask(task_id, 5 if run_class == "final_repeat" else 3,
                         candidate_id, run_class=run_class, concurrency=target,
-                        candidate_hash=state["candidates"][candidate_id]["config_hash"])
+                        candidate_hash=candidates[candidate_id]["config_hash"])
         path = root / "trials" / task_id / f"attempt-{attempt:03d}" / "trial.json"
         entries.append({"manifest": str(path.relative_to(root)), "completed": False})
         save()
-        metadata = copy.deepcopy(template.metadata)
-        metadata["candidates"] = state["candidates"]
+        metadata = copy.deepcopy(plan.metadata)
+        metadata["candidates"] = candidates
         try:
             if executor is None:
                 adapter = ReplayAdapter(metadata, root / "trials")
@@ -465,45 +457,40 @@ def run_tuning(config_path: str | Path, *, use_captured: bool = False,
         collect_results(root)
         return result
 
-    if not state["candidates"]:
-        propose(first=True)
-    while state["phase"] == "explore" and used() < limit - reserve:
-        if previous_elapsed + time.monotonic() - started >= config.search.max_seconds:
+    while state["phase"] == "explore" and state["next_index"] < len(candidate_ids):
+        if used() >= limit - 2 * repetitions:
+            state["decisions"].append({"reason": "exploration_trial_budget_exhausted"})
+            break
+        if elapsed() >= max_seconds:
             state["decisions"].append({"reason": "time_budget_exhausted"})
             break
-        if not state["pending"]:
+        candidate_id = candidate_ids[state["next_index"]]
+        result = one_trial(candidate_id, "tuning")
+        if not any(row["candidate_id"] == candidate_id for row in state["observations"]):
+            state["observations"].append({"candidate_id": candidate_id,
+                                          "score": result["score"], "status": result["status"],
+                                          "output_tokens_per_second": result.get("output_tokens_per_second"),
+                                          "latency_seconds": result.get("latency_seconds"),
+                                          "reasons": result.get("reasons", [])})
+        state["next_index"] += 1
+        save()
+        if state["next_index"] % 5 == 0:
             current = max((row["score"] for row in state["observations"]
                            if row["score"] is not None), default=None)
             previous = state.get("last_batch_best")
             if current is not None and previous is not None:
-                improvement = (current - previous) / max(abs(previous), 1e-9)
-                state["stagnant_batches"] = 0 if improvement > 0.01 else state.get("stagnant_batches", 0) + 1
+                gain = (current - previous) / max(abs(previous), 1e-9)
+                state["stagnant_batches"] = 0 if gain > 0.01 else state["stagnant_batches"] + 1
                 if state["stagnant_batches"] >= 2:
                     state["decisions"].append({"reason": "converged_no_improvement"})
                     break
             state["last_batch_best"] = current
-            propose(first=False)
-            if not state["pending"]:
-                state["decisions"].append({"reason": "no_new_candidates"})
-                break
-            if previous_elapsed + time.monotonic() - started >= config.search.max_seconds:
-                state["decisions"].append({"reason": "time_budget_exhausted_after_advisor"})
-                break
-        candidate_id = state["pending"].pop(0)
-        save()
-        result = one_trial(candidate_id, "tuning")
-        if not any(row["candidate_id"] == candidate_id for row in state["observations"]):
-            state["observations"].append({"candidate_id": candidate_id,
-                                          "score": result["score"],
-                                          "status": result["status"],
-                                          "output_tokens_per_second": result.get("output_tokens_per_second"),
-                                          "latency_seconds": result.get("latency_seconds"),
-                                          "reasons": result.get("reasons", [])})
-        save()
+            save()
     state["phase"] = "final"
     save()
     ranked = sorted((row for row in state["observations"] if row["score"] is not None),
                     key=lambda row: row["score"], reverse=True)
+
     def verified(candidate_id: str, repeats: list[dict]) -> dict | None:
         scores = [_metric(row, scene["priority"]) for row in repeats]
         effective = repeats[0].get("effective_static_config") if repeats else None
@@ -511,7 +498,7 @@ def run_tuning(config_path: str | Path, *, use_captured: bool = False,
                 and all(row.get("effective_static_config") == effective for row in repeats)):
             return None
         median = statistics.median(scores)
-        planned = state["candidates"][candidate_id]
+        planned = candidates[candidate_id]
         configuration = copy.deepcopy(planned)
         if effective is not None:
             configuration["static_config"] = effective
@@ -532,22 +519,20 @@ def run_tuning(config_path: str | Path, *, use_captured: bool = False,
     if ranked:
         finalist = ranked[0]
         repeats = [one_trial(finalist["candidate_id"], "final_repeat", f"-r{i + 1}")
-                   for i in range(repetitions) if (used() < limit and
-                       previous_elapsed + time.monotonic() - started < config.search.max_seconds)]
+                   for i in range(repetitions) if used() < limit and elapsed() < max_seconds]
         best = verified(finalist["candidate_id"], repeats)
-    baseline = next((row for row in state["observations"] if row["candidate_id"] == catalog["base_candidates"][0]["id"]), None)
+    baseline = next((row for row in state["observations"] if row["candidate_id"] == baseline_id), None)
     baseline_validated = None
     if baseline and baseline["score"] is not None:
-        if best and baseline["candidate_id"] == best["candidate_id"]:
-            baseline_validated = {"candidate_id": baseline["candidate_id"],
+        if best and baseline_id == best["candidate_id"]:
+            baseline_validated = {"candidate_id": baseline_id,
                                   "metric_value": best["metric_value"], "repetitions": repetitions}
         else:
-            baseline_repeats = [one_trial(baseline["candidate_id"], "final_repeat", f"-baseline-r{i + 1}")
-                                for i in range(repetitions) if (used() < limit and
-                                    previous_elapsed + time.monotonic() - started < config.search.max_seconds)]
-            baseline_best = verified(baseline["candidate_id"], baseline_repeats)
+            repeats = [one_trial(baseline_id, "final_repeat", f"-baseline-r{i + 1}")
+                       for i in range(repetitions) if used() < limit and elapsed() < max_seconds]
+            baseline_best = verified(baseline_id, repeats)
             if baseline_best:
-                baseline_validated = {"candidate_id": baseline["candidate_id"],
+                baseline_validated = {"candidate_id": baseline_id,
                                       "metric_value": baseline_best["metric_value"],
                                       "repetitions": repetitions}
                 if best is None or baseline_best["score"] > best["score"]:
@@ -556,22 +541,14 @@ def run_tuning(config_path: str | Path, *, use_captured: bool = False,
                   "baseline_validated": baseline_validated,
                   "metric": "output_tokens_per_second" if scene["priority"] == "throughput" else "latency_seconds.p95",
                   "target_concurrency": target}
-    summary = None
-    if best:
-        try:
-            explanation = local_advisor.ask("explain", {"scenario": scene, "comparison": comparison})
-            if isinstance(explanation.get("summary"), str):
-                summary = explanation["summary"][:2000]
-        except ConfigError as exc:
-            state["advisor_calls"].append({"task": "explain", "status": "FALLBACK", "reason": str(exc)})
-    if summary is None:
-        summary = ("按指定业务并发完成复验；详细指标、实际输出长度与复现脚本见 best.json。"
-                   if best else "未得到通过重复复验的推荐配置；请检查试验失败原因。")
-    report = {"version": 3, "workflow_mode": "tune", "status": "PASS" if best else "INCONCLUSIVE",
-              "result_dir": str(root), "scenario": scene, "workload_source": template.metadata["workload_source"],
-              "scene_calibration": template.metadata.get("scene_calibration"),
+    summary = ("按指定业务并发完成复验；详细指标、实际输出长度与复现脚本见 best.json。"
+               if best else "未得到通过重复复验的推荐配置；请检查试验失败原因。")
+    report = {"version": 4, "workflow_mode": "tune", "status": "PASS" if best else "INCONCLUSIVE",
+              "result_dir": str(root), "scenario": scene,
+              "workload_source": plan.metadata["workload_source"],
+              "scene_calibration": plan.metadata.get("scene_calibration"),
               "best": best, "comparison": comparison, "summary": summary,
-              "trials": used(), "advisor_calls": state["advisor_calls"],
+              "trials": used(), "advisor_calls": plan.metadata["planning"]["advisor_calls"],
               "stop_reasons": state["decisions"],
               "length_note": "max_tokens is an upper bound; compare observed server usage in each trial"}
     write_json_atomic(root / "best.json", report)

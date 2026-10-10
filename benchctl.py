@@ -16,13 +16,13 @@ if __package__:
     from .llmperf.search import collect_results
     from .llmperf.workflow import run_saved_plan, run_workflow
     from .llmperf.advisor import extract_and_save_scenario
-    from .llmperf.tuning import run_tuning
+    from .llmperf.tuning import plan_tuning
 else:
     from llmperf.errors import ConfigError
     from llmperf.search import collect_results
     from llmperf.workflow import run_saved_plan, run_workflow
     from llmperf.advisor import extract_and_save_scenario
-    from llmperf.tuning import run_tuning
+    from llmperf.tuning import plan_tuning
 
 
 def main(argv=None):
@@ -43,10 +43,9 @@ def main(argv=None):
     scene = sub.add_parser('scenario', help='parse a natural-language scene and write it to experiment.json')
     scene.add_argument('--config', required=True)
     scene.add_argument('--describe', required=True, help='input/output token maxima, business concurrency and priority')
-    tune = sub.add_parser('tune', help='run or resume scene-driven automatic tuning')
+    tune = sub.add_parser('tune-plan', help='save a complete scene-driven plan without benchmarking')
     tune.add_argument('--config', required=True)
     tune.add_argument('--use-captured', action='store_true', help='use input_path JSONL instead of a generated scene workload')
-    tune.add_argument('--resume-run', help='existing tune result directory')
     args = parser.parse_args(argv)
     try:
         if args.command == 'run':
@@ -58,9 +57,8 @@ def main(argv=None):
             result = {'status': 'PASS', 'rows': len(collected['rows']), 'result_dir': args.run}
         elif args.command == 'scenario':
             result = extract_and_save_scenario(args.config, args.describe)
-        elif args.command == 'tune':
-            result = run_tuning(args.config, use_captured=args.use_captured,
-                                resume_run=args.resume_run)
+        elif args.command == 'tune-plan':
+            result = plan_tuning(args.config, use_captured=args.use_captured)
         else:
             result = run_workflow(args.config, stop_after=args.command)
         # Detailed measurements stay in best.json; stdout keeps the usable result.

@@ -278,7 +278,7 @@ async function selectRun(runId, options) {
   renderTrials();
   renderArtifacts();
   var isTune = (state.runDetail.summary || {}).workflow_mode === "tune";
-  el("run-plan").disabled = isTune;
+  el("run-plan").disabled = (state.runDetail.summary || {}).status !== "PLANNED";
   el("resume-run").disabled = false;
   el("adopt-runtime").disabled = isTune;
   el("collect-run").disabled = false;
@@ -289,6 +289,8 @@ function renderSummary() {
   var summary = detail.summary || {};
   var bestDoc = detail.best || {};
   var best = bestDoc.best || null;
+  var planMeta = (detail.plan && detail.plan.metadata) || {};
+  var planning = planMeta.planning || {};
   var code = detail.code_state || {};
   var rows = (detail.results_index && detail.results_index.rows) || [];
   var validRows = rows.filter(function(row) { return row.status === "VALID"; });
@@ -299,6 +301,10 @@ function renderSummary() {
     ["状态", summary.status],
     ["路径", summary.path],
     ["候选数", summary.candidate_count],
+    ["固定请求数", planMeta.expected_request_count],
+    ["计划探索上限", planning.exploration_capacity],
+    ["复验预留次数", planning.reserved_final_trials],
+    ["顾问规划结果", planning.advisor_calls],
     ["Trial 数", summary.row_count],
     ["当前阶段", currentStage(state.trials, bestDoc)],
     ["阶段统计", stageSummary(state.trials)],
@@ -306,7 +312,7 @@ function renderSummary() {
     ["Best candidate", best && best.candidate_id],
     ["Best concurrency", best && best.concurrency],
     ["Best output tok/s", best && best.output_tokens_per_second],
-    ["场景", bestDoc.scenario],
+    ["场景", bestDoc.scenario || detail.scenario],
     ["选优指标", bestDoc.comparison && bestDoc.comparison.metric],
     ["复验指标值", best && best.metric_value],
     ["基线复验值", bestDoc.comparison && bestDoc.comparison.baseline_validated && bestDoc.comparison.baseline_validated.metric_value],
@@ -590,11 +596,6 @@ async function planRun() {
   await createJob("/api/jobs/plan", { config_path: state.configPath });
 }
 
-async function autoRun() {
-  state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
-  await createJob("/api/jobs/auto", { config_path: state.configPath });
-}
-
 async function parseScenario() {
   state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
   var description = el("scenario-description").value.trim();
@@ -629,7 +630,7 @@ function resetScenario() {
 
 async function tuneRun() {
   state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
-  await createJob("/api/jobs/tune", { config_path: state.configPath });
+  await createJob("/api/jobs/tune-plan", { config_path: state.configPath });
 }
 
 async function startSavedPlan(resume) {
@@ -692,7 +693,6 @@ async function repairSelectedTrial() {
 function bindEvents() {
   el("refresh-runs").addEventListener("click", function() { loadRuns().catch(showError); });
   el("plan-run").addEventListener("click", function() { planRun().catch(showError); });
-  el("auto-run").addEventListener("click", function() { autoRun().catch(showError); });
   el("parse-scenario").addEventListener("click", function() { parseScenario().catch(showError); });
   el("reset-scenario").addEventListener("click", resetScenario);
   el("tune-run").addEventListener("click", function() { tuneRun().catch(showError); });

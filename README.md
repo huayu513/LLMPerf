@@ -21,22 +21,22 @@
 ```bash
 python3 benchctl.py scenario --config configs/experiment.json \
   --describe "输入最多 8K token，输出最多 2K token，业务并发约 32，时延优先"
-python3 benchctl.py tune --config configs/experiment.json
+python3 benchctl.py tune-plan --config configs/experiment.json
 ```
 
-模型只提取最大输入 token、最大输出 token、业务并发和 `latency` / `throughput` 优先级。有缺项时返回一个追问，不修改配置；信息完整时平台校验数值并写入 `scenario`，随后每次 run 保存不可变快照。调优默认按输入与输出各三个长度档位的九种组合构造固定请求集；如需沿用 `input_path` 的原始 JSONL，执行 `tune --use-captured`。生成负载时会尝试用目标镜像中的 checkpoint tokenizer 校准输入档位，失败时保留保守近似，并在结果中标明。输出 `max_tokens` 是请求上限，实际输入/输出 token 由压测服务器的 usage 核验；若实际输入超过给定最大值，该试验不能参与选优。
+模型只提取最大输入 token、最大输出 token、业务并发和 `latency` / `throughput` 优先级。有缺项时返回一个追问，不修改配置；信息完整时平台校验数值并写入 `scenario`，随后每次 run 保存不可变快照。调优默认按输入与输出各三个长度档位的九种组合构造固定请求集；如需沿用 `input_path` 的原始 JSONL，执行 `tune-plan --use-captured`。生成负载时会尝试用目标镜像中的 checkpoint tokenizer 校准输入档位，失败时保留保守近似，并在结果中标明。输出 `max_tokens` 是请求上限，实际输入/输出 token 由压测服务器的 usage 核验；若实际输入超过给定最大值，该试验不能参与选优。
 
-平台按模型、GPU 和镜像能力建立参数目录；本地大模型只在首批以及每批试验后提出候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时自动用规则候选补足。所有候选在指定业务并发下使用同一请求集；吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有填写明确 SLO 时不会凭空设时延门槛。最佳配置与安全基线都做重复复验，报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
+平台按模型、GPU 和镜像能力建立参数目录；本地大模型只在生成计划时推荐候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。平台将完整、有序的候选集与固定请求集写入不可变的 `plan.json`；此时不启动模型服务进行压测。所有候选在指定业务并发下使用同一请求集；吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有填写明确 SLO 时不会凭空设时延门槛。最佳配置与安全基线都做重复复验，报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
 
 Web 页面在场景信息不足时保留前文，可直接输入补充信息继续解析；“重新描述”会清空这段对话。
 
-中断后继续智能调优：
+检查计划后，在 Web 页面选中该 run 点击“开始搜索”，或执行：
 
 ```bash
-python3 benchctl.py tune --config configs/experiment.json --resume-run /path/to/result-dir
+python3 benchctl.py run --plan /path/to/result-dir/plan.json
 ```
 
-恢复时核对配置、模型、固定请求集、GPU、镜像和运行时代码。`tune-state.json`、`catalog.json`、`scenario.json` 与 `best.json` 位于该 run 的结果目录。运行现有吞吐 `auto` 时仍必须提供 `input_path`，其规划和评分逻辑没有变化。
+中断后点击“严格 Resume”，或执行 `python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume`。开始搜索和恢复都只读取已保存的计划；实测阶段不调用顾问模型，也不新增候选。运行前核对模型、固定请求集、GPU、镜像和运行时代码。规划阶段保存 `plan.json`、`plan-lock.json`、`catalog.json` 和 `scenario.json`；开始搜索后才生成 `tune-state.json`、trial 与 `best.json`。运行现有吞吐 `auto` 时仍必须提供 `input_path`，其规划和评分逻辑没有变化。
 
 ## 首次部署与启动
 

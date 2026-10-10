@@ -913,14 +913,6 @@ def run_plan_job(config_path: Path) -> dict[str, Any]:
 
 
 def run_saved_plan_job(run_dir: Path, resume: bool = False) -> dict[str, Any]:
-    plan = json_load(run_dir / "plan.json", {})
-    metadata = plan.get("metadata", {}) if isinstance(plan, dict) else {}
-    if metadata.get("workflow_mode") == "tune":
-        config_path = metadata.get("config_path")
-        if not config_path:
-            raise ValueError("tune plan is missing its config path")
-        argv = benchctl_argv("tune", "--config", str(config_path), "--resume-run", str(run_dir))
-        return JOBS.create_subprocess("tune-resume", argv, LLMPERF_ROOT, target_run=run_dir)
     argv = benchctl_argv("run", "--plan", str(run_dir / "plan.json"))
     if resume:
         argv.append("--resume")
@@ -932,10 +924,10 @@ def run_auto_job(config_path: Path) -> dict[str, Any]:
 
 
 def run_tune_job(config_path: Path, use_captured: bool = False) -> dict[str, Any]:
-    argv = benchctl_argv("tune", "--config", str(config_path))
+    argv = benchctl_argv("tune-plan", "--config", str(config_path))
     if use_captured:
         argv.append("--use-captured")
-    return JOBS.create_subprocess("tune", argv, LLMPERF_ROOT)
+    return JOBS.create_subprocess("tune-plan", argv, LLMPERF_ROOT)
 
 
 def collect_run(run_dir: Path) -> dict[str, Any]:
@@ -1669,7 +1661,7 @@ class LLMPerfHandler(BaseHTTPRequestHandler):
         if parts == ["jobs", "auto"]:
             config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
             return self.send_json(run_auto_job(config_path), HTTPStatus.ACCEPTED)
-        if parts == ["jobs", "tune"]:
+        if parts == ["jobs", "tune-plan"]:
             config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
             return self.send_json(run_tune_job(config_path, body.get("use_captured") is True), HTTPStatus.ACCEPTED)
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "stop":

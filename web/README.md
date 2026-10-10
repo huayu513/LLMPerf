@@ -27,7 +27,7 @@ from \`web/static\`. The default result root is
 - \`POST /api/jobs/plan\` with \`{ "config_path": "configs/experiment.json" }\`
 - \`POST /api/jobs/auto\` with \`{ "config_path": "configs/experiment.json" }\`
 - \`POST /api/scenario/parse\` with \`{ "config_path": "configs/experiment.json", "description": "输入最多 8K、输出最多 2K、并发 32、时延优先" }\`
-- \`POST /api/jobs/tune\` with \`{ "config_path": "configs/experiment.json" }\`
+- \`POST /api/jobs/tune-plan\` with \`{ "config_path": "configs/experiment.json" }\`
 - \`POST /api/runs/{run_id}/run?result_root=...\`
 - \`POST /api/runs/{run_id}/resume?result_root=...\`
 - \`POST /api/runs/{run_id}/collect?result_root=...\`
@@ -35,6 +35,8 @@ from \`web/static\`. The default result root is
 - \`POST /api/runs/{run_id}/debug-rerun?result_root=...\`
 - \`POST /api/runs/{run_id}/debug-search?result_root=...\`
 - \`POST /api/runs/{run_id}/repair-trial?result_root=...\`
+
+控制台中的“生成 Auto 计划”和“生成智能调优计划”都只保存待审阅的计划；选中 run 后点击同一个“开始搜索”才调用 \`/api/runs/{run_id}/run\` 实测。\`/api/jobs/auto\` 保留为旧的一步式接口，不在控制台主流程中使用。
 
 \`adopt-runtime\` updates \`plan.json.metadata.bundle_fingerprint\` and
 \`search-state.json.plan_hash\` after backing both files up under
