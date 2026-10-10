@@ -5,4 +5,5 @@ results/
 debug-trials/
 *.log
 .DS_Store
-tests/
+tests/*
+!tests/test_tuning.py

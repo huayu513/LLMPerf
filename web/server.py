@@ -40,6 +40,7 @@ from llmperf.adapters import (  # noqa: E402
     read_attempt,
 )
 from llmperf.artifacts import write_json_atomic  # noqa: E402
+from llmperf.advisor import extract_and_save_scenario  # noqa: E402
 from llmperf.docker_runtime import DockerRuntime  # noqa: E402
 from llmperf.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
 from llmperf.search import (  # noqa: E402
@@ -138,6 +139,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
     best_doc = json_load(run_dir / "best.json", {})
     plan = json_load(run_dir / "plan.json", {})
     state = json_load(run_dir / "search-state.json", {})
+    tune_state = json_load(run_dir / "tune-state.json", {})
     rows_doc = json_load(run_dir / "results-index.json", {})
     files = {
         "resolved_config": (run_dir / "resolved-config.json").is_file(),
@@ -155,6 +157,8 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         status = best_doc.get("status")
     if status is None and isinstance(state, dict) and state:
         status = "RUNNING_OR_INTERRUPTED"
+    if status is None and isinstance(tune_state, dict) and tune_state:
+        status = "RUNNING_OR_INTERRUPTED"
     if status is None and files["plan"]:
         status = "PLANNED"
     if status is None:
@@ -168,6 +172,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "candidate_count": len(candidates) if isinstance(candidates, list) else None,
         "row_count": row_count,
         "best_summary": summarize_best(best_doc if isinstance(best_doc, dict) else None),
+        "workflow_mode": plan.get("metadata", {}).get("workflow_mode", "auto") if isinstance(plan, dict) else "auto",
         "served_model_name": (
             resolved.get("served_model_name")
             if isinstance(resolved, dict)
@@ -908,6 +913,14 @@ def run_plan_job(config_path: Path) -> dict[str, Any]:
 
 
 def run_saved_plan_job(run_dir: Path, resume: bool = False) -> dict[str, Any]:
+    plan = json_load(run_dir / "plan.json", {})
+    metadata = plan.get("metadata", {}) if isinstance(plan, dict) else {}
+    if metadata.get("workflow_mode") == "tune":
+        config_path = metadata.get("config_path")
+        if not config_path:
+            raise ValueError("tune plan is missing its config path")
+        argv = benchctl_argv("tune", "--config", str(config_path), "--resume-run", str(run_dir))
+        return JOBS.create_subprocess("tune-resume", argv, LLMPERF_ROOT, target_run=run_dir)
     argv = benchctl_argv("run", "--plan", str(run_dir / "plan.json"))
     if resume:
         argv.append("--resume")
@@ -916,6 +929,13 @@ def run_saved_plan_job(run_dir: Path, resume: bool = False) -> dict[str, Any]:
 
 def run_auto_job(config_path: Path) -> dict[str, Any]:
     return JOBS.create_subprocess("auto", benchctl_argv("auto", "--config", str(config_path)), LLMPERF_ROOT)
+
+
+def run_tune_job(config_path: Path, use_captured: bool = False) -> dict[str, Any]:
+    argv = benchctl_argv("tune", "--config", str(config_path))
+    if use_captured:
+        argv.append("--use-captured")
+    return JOBS.create_subprocess("tune", argv, LLMPERF_ROOT)
 
 
 def collect_run(run_dir: Path) -> dict[str, Any]:
@@ -1640,12 +1660,18 @@ class LLMPerfHandler(BaseHTTPRequestHandler):
         self.send_error_json(HTTPStatus.NOT_FOUND, "unknown endpoint")
 
     def handle_post_api(self, parts: list[str], query: dict[str, list[str]], body: dict[str, Any]) -> None:
+        if parts == ["scenario", "parse"]:
+            config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
+            return self.send_json(extract_and_save_scenario(config_path, str(body.get("description") or "")))
         if parts == ["jobs", "plan"]:
             config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
             return self.send_json(run_plan_job(config_path), HTTPStatus.ACCEPTED)
         if parts == ["jobs", "auto"]:
             config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
             return self.send_json(run_auto_job(config_path), HTTPStatus.ACCEPTED)
+        if parts == ["jobs", "tune"]:
+            config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
+            return self.send_json(run_tune_job(config_path, body.get("use_captured") is True), HTTPStatus.ACCEPTED)
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "stop":
             return self.send_json(JOBS.stop(parts[1]), HTTPStatus.ACCEPTED)
         if len(parts) >= 2 and parts[0] == "runs":
@@ -1722,6 +1748,9 @@ def run_detail(run_dir: Path) -> dict[str, Any]:
         "environment": json_load(run_dir / "environment.json", None),
         "plan": json_load(run_dir / "plan.json", None),
         "search_state": json_load(run_dir / "search-state.json", None),
+        "tune_state": json_load(run_dir / "tune-state.json", None),
+        "scenario": json_load(run_dir / "scenario.json", None),
+        "catalog": json_load(run_dir / "catalog.json", None),
         "results_index": json_load(run_dir / "results-index.json", None),
         "leaderboard": json_load(run_dir / "leaderboard.json", None),
         "best_so_far": json_load(run_dir / "best-so-far.json", None),

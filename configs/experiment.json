@@ -11,5 +11,11 @@
     "max_trials": 666,
     "max_seconds": 864000,
     "explore_request_limit": 512
+  },
+  "advisor": {
+  "base_url": "http://你的模型服务地址:端口/v1",
+  "model": "接口中使用的模型名",
+  "timeout_seconds": 300,
+  "api_key_env": "LLMPERF_ADVISOR_KEY"
   }
 }

@@ -26,6 +26,8 @@ from \`web/static\`. The default result root is
 - \`GET /api/runs/{run_id}/artifact?result_root=...&path=trials/.../server.log\`
 - \`POST /api/jobs/plan\` with \`{ "config_path": "configs/experiment.json" }\`
 - \`POST /api/jobs/auto\` with \`{ "config_path": "configs/experiment.json" }\`
+- \`POST /api/scenario/parse\` with \`{ "config_path": "configs/experiment.json", "description": "输入最多 8K、输出最多 2K、并发 32、时延优先" }\`
+- \`POST /api/jobs/tune\` with \`{ "config_path": "configs/experiment.json" }\`
 - \`POST /api/runs/{run_id}/run?result_root=...\`
 - \`POST /api/runs/{run_id}/resume?result_root=...\`
 - \`POST /api/runs/{run_id}/collect?result_root=...\`

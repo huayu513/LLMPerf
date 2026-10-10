@@ -15,10 +15,14 @@ if __package__:
     from .llmperf.errors import ConfigError
     from .llmperf.search import collect_results
     from .llmperf.workflow import run_saved_plan, run_workflow
+    from .llmperf.advisor import extract_and_save_scenario
+    from .llmperf.tuning import run_tuning
 else:
     from llmperf.errors import ConfigError
     from llmperf.search import collect_results
     from llmperf.workflow import run_saved_plan, run_workflow
+    from llmperf.advisor import extract_and_save_scenario
+    from llmperf.tuning import run_tuning
 
 
 def main(argv=None):
@@ -36,6 +40,13 @@ def main(argv=None):
     run.add_argument('--resume', action='store_true')
     collect = sub.add_parser('collect', help='rebuild results-index.json from recorded attempts')
     collect.add_argument('--run', required=True, help='experiment result directory')
+    scene = sub.add_parser('scenario', help='parse a natural-language scene and write it to experiment.json')
+    scene.add_argument('--config', required=True)
+    scene.add_argument('--describe', required=True, help='input/output token maxima, business concurrency and priority')
+    tune = sub.add_parser('tune', help='run or resume scene-driven automatic tuning')
+    tune.add_argument('--config', required=True)
+    tune.add_argument('--use-captured', action='store_true', help='use input_path JSONL instead of a generated scene workload')
+    tune.add_argument('--resume-run', help='existing tune result directory')
     args = parser.parse_args(argv)
     try:
         if args.command == 'run':
@@ -45,15 +56,20 @@ def main(argv=None):
                 raise ConfigError(f'result directory does not exist: {args.run}')
             collected = collect_results(args.run)
             result = {'status': 'PASS', 'rows': len(collected['rows']), 'result_dir': args.run}
+        elif args.command == 'scenario':
+            result = extract_and_save_scenario(args.config, args.describe)
+        elif args.command == 'tune':
+            result = run_tuning(args.config, use_captured=args.use_captured,
+                                resume_run=args.resume_run)
         else:
             result = run_workflow(args.config, stop_after=args.command)
         # Detailed measurements stay in best.json; stdout keeps the usable result.
-        output = {k: result[k] for k in ('status', 'result_dir', 'plan', 'candidates', 'requests', 'rows', 'trials') if k in result}
+        output = {k: result[k] for k in ('status', 'result_dir', 'plan', 'candidates', 'requests', 'rows', 'trials', 'scenario', 'question', 'summary') if k in result}
         if result.get('best'):
             best = result['best']
-            output['best'] = {k: best[k] for k in ('candidate_id', 'concurrency', 'output_tokens_per_second', 'repetitions')}
+            output['best'] = {k: best[k] for k in ('candidate_id', 'concurrency', 'priority', 'metric_value', 'output_tokens_per_second', 'repetitions') if k in best}
         print(json.dumps(output, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get('status') in {'PASS', 'WARN'} else 1
+        return 0 if result.get('status') in {'PASS', 'WARN', 'NEEDS_INPUT'} else 1
     except ConfigError as exc:
         print(f'benchctl: configuration error: {exc}', file=sys.stderr)
         return 2

@@ -2,6 +2,40 @@
 
 只维护 `configs/experiment.json`，用一条命令完成模型识别、环境检查、输入索引、参数搜索、重复验证和结果收集。`LLMPerf/` 可单独复制到目标机器，不依赖旁边的 sglang 或其他 benchmarks 目录。
 
+## 场景驱动智能调优（新模式）
+
+原来的 `auto` 保持原样。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算；`input_path` 在新模式下可以省略。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
+
+```json
+"advisor": {
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "local-advisor",
+  "timeout_seconds": 60
+}
+```
+
+若接口需要令牌，可加 `"api_key_env": "LLMPERF_ADVISOR_KEY"`，令牌只从该环境变量读取。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
+
+```bash
+python3 benchctl.py scenario --config configs/experiment.json \
+  --describe "输入最多 8K token，输出最多 2K token，业务并发约 32，时延优先"
+python3 benchctl.py tune --config configs/experiment.json
+```
+
+模型只提取最大输入 token、最大输出 token、业务并发和 `latency` / `throughput` 优先级。有缺项时返回一个追问，不修改配置；信息完整时平台校验数值并写入 `scenario`，随后每次 run 保存不可变快照。调优默认按输入与输出各三个长度档位的九种组合构造固定请求集；如需沿用 `input_path` 的原始 JSONL，执行 `tune --use-captured`。生成负载时会尝试用目标镜像中的 checkpoint tokenizer 校准输入档位，失败时保留保守近似，并在结果中标明。输出 `max_tokens` 是请求上限，实际输入/输出 token 由压测服务器的 usage 核验；若实际输入超过给定最大值，该试验不能参与选优。
+
+平台按模型、GPU 和镜像能力建立参数目录；本地大模型只在首批以及每批试验后提出候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时自动用规则候选补足。所有候选在指定业务并发下使用同一请求集；吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有填写明确 SLO 时不会凭空设时延门槛。最佳配置与安全基线都做重复复验，报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
+
+Web 页面在场景信息不足时保留前文，可直接输入补充信息继续解析；“重新描述”会清空这段对话。
+
+中断后继续智能调优：
+
+```bash
+python3 benchctl.py tune --config configs/experiment.json --resume-run /path/to/result-dir
+```
+
+恢复时核对配置、模型、固定请求集、GPU、镜像和运行时代码。`tune-state.json`、`catalog.json`、`scenario.json` 与 `best.json` 位于该 run 的结果目录。运行现有吞吐 `auto` 时仍必须提供 `input_path`，其规划和评分逻辑没有变化。
+
 ## 首次部署与启动
 
 机器需要可运行 `python3` 的 Python 环境、NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。模型权重、输入 JSONL 和运行镜像放在目标机器上。镜像需要提供可用的 `sglang serve` 命令，并包含 PyTorch、aiohttp、bash、curl、setsid；程序检查本地镜像，不自动拉取或构建镜像。
