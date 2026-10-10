@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmperf.advisor import LocalAdvisor, extract_and_save_scenario
-from llmperf.configuration import load_config
+from llmperf.configuration import load_config, validate_scenario
 from llmperf.errors import ConfigError
 from llmperf.scene_workload import create_scene_workload
 from llmperf.tuning import _result_length_evidence, run_tuning
@@ -62,6 +62,19 @@ class TuningTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(load_config(self.config, tuning=True).scenario, SCENE)
         self.assertEqual(advisor.calls[0][0], "scene")
+
+    def test_large_scene_has_no_fixed_token_or_concurrency_ceiling(self):
+        large = {"max_input_tokens": 500 * 1024, "max_output_tokens": 500 * 1024,
+                 "target_concurrency": 48, "priority": "latency"}
+        class LargeAdvisor:
+            def ask(self, *_):
+                return {"scenario": large}
+        result = extract_and_save_scenario(self.config,
+            "输入最多500k，输出最多500k，并发最多48，时延优先", advisor=LargeAdvisor())
+        self.assertEqual(result["scenario"], large)
+        self.assertEqual(load_config(self.config, tuning=True).scenario, large)
+        self.assertEqual(validate_scenario({**large, "target_concurrency": 2048})
+                         ["target_concurrency"], 2048)
 
     def test_openai_compatible_client_sends_json_to_local_endpoint(self):
         captured = {}
