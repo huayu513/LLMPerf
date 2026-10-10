@@ -238,10 +238,6 @@ def validate_scenario(value: Any) -> dict[str, Any]:
     }
     if result["priority"] not in {"latency", "throughput"}:
         raise ConfigError("scenario.priority must be latency or throughput")
-    for key, maximum in (("max_input_tokens", 131072), ("max_output_tokens", 65536),
-                         ("target_concurrency", 1024)):
-        if result[key] > maximum:
-            raise ConfigError(f"scenario.{key} must be <= {maximum}")
     return result
 
 
