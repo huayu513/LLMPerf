@@ -8,13 +8,15 @@
 
 ```json
 "advisor": {
-  "base_url": "http://127.0.0.1:8000/v1",
-  "model": "local-advisor",
-  "timeout_seconds": 60
+  "base_url": "http://10.64.39.63:54321/v1/chat/completions",
+  "model": "s1-model",
+  "model_pool": "dsv41",
+  "timeout_seconds": 300,
+  "authorization": "Bearer <接口令牌>"
 }
 ```
 
-若接口需要令牌，可加 `"api_key_env": "LLMPERF_ADVISOR_KEY"`，令牌只从该环境变量读取。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
+顾问请求会发送配置中的 `Authorization: Bearer <令牌>`、`Content-Type: application/json`、`X-Model-Pool: dsv41`，请求体固定带 `reasoning_effort: "none"`、`chat_template_kwargs: {"thinking": false}`、`max_tokens: 64`、`temperature: 0` 和 `stream: false`。也可用 `"api_key_env": "LLMPERF_ADVISOR_KEY"` 代替 `authorization`，从环境变量生成相同的 Bearer Header。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
 
 ```bash
 python3 benchctl.py scenario --config configs/experiment.json \
