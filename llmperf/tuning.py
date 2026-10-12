@@ -433,6 +433,13 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         return sum(1 for entries in state["trials"].values() for entry in entries
                    if adaptive or entry.get("completed") is True)
 
+    def validate_artifacts(result):
+        for artifact in result.get("artifact_fingerprints", []):
+            path = root / artifact["manifest"]
+            if (not path.resolve().is_relative_to((root / "trials").resolve()) or
+                    not path.is_file() or sha256_file(path) != artifact["sha256"]):
+                raise ConfigError("recorded native trial artifact changed")
+
     scheduler = None
     if adaptive:
         for entries in state["trials"].values():
@@ -444,6 +451,17 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                     if (not path.resolve().is_relative_to((root / "trials").resolve()) or
                             not path.is_file() or sha256_file(path) != entry["sha256"]):
                         raise ConfigError("recorded adaptive trial evidence changed")
+                    validate_artifacts(json.loads(path.read_text(encoding="utf-8")))
+        for observation in state["observations"]:
+            evidence = observation["evidence"]
+            path = root / evidence["manifest"]
+            if (not path.resolve().is_relative_to((root / "trials").resolve()) or
+                    sha256_file(path) != evidence["sha256"]):
+                raise ConfigError("adaptive observation evidence changed")
+            recorded = json.loads(path.read_text(encoding="utf-8"))
+            if any(observation.get(key) != recorded.get(key) for key in
+                   ("candidate_id", "task_id", "score", "status", "effective_static_config")):
+                raise ConfigError("adaptive observation does not match recorded measurement")
         scheduler = AdaptiveScheduler(plan.metadata, candidates, root, state, save, advisor=advisor)
         if state["phase"] in {"complete", "inconclusive"}:
             report_path = root / "best.json"
@@ -470,6 +488,7 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                             or result.get("concurrency") != target or result.get("run_class") != run_class
                             or result.get("score") != _metric(result, scene["priority"])):
                         raise ConfigError("interrupted trial has invalid result identity")
+                    validate_artifacts(result)
                     entry.update(completed=True, sha256=sha256_file(path))
                     save()
                     return result
@@ -513,6 +532,16 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         if adaptive:
             result["trial_seconds"] = time.monotonic() - trial_started
             result = redact(result, scheduler.secrets)
+            result["artifact_fingerprints"] = []
+            artifact_root = Path(result.get("result_path", path.parent)).resolve()
+            if artifact_root.is_relative_to((root / "trials").resolve()) and artifact_root.is_dir():
+                for artifact in sorted(artifact_root.rglob("*")):
+                    if (artifact.is_file() and artifact.suffix in {".json", ".jsonl", ".sh"}
+                            and artifact.resolve() != path.resolve()
+                            and artifact.resolve().is_relative_to(artifact_root)):
+                        result["artifact_fingerprints"].append({
+                            "manifest": str(artifact.resolve().relative_to(root.resolve())),
+                            "sha256": sha256_file(artifact)})
         write_json_atomic(path, result)
         entries[-1] = {"manifest": str(path.relative_to(root)),
                        "sha256": sha256_file(path), "completed": True}
@@ -620,7 +649,8 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         if not (len(repeats) == repetitions and all(score is not None for score in scores)
                 and all(row.get("effective_static_config") == effective for row in repeats)):
             return None
-        if adaptive and any(_metric(row, "throughput") is None for row in repeats):
+        if adaptive and (not isinstance(effective, dict) or
+                         any(_metric(row, "throughput") is None for row in repeats)):
             return None
         median = statistics.median(scores)
         planned = candidates[candidate_id]

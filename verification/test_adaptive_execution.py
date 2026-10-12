@@ -235,6 +235,30 @@ class AdaptiveExecutionTests(unittest.TestCase):
         self.assertEqual(report["trials"], 14)
         self.assertEqual(len(self.executed), 14)
 
+    def test_resume_checks_native_usage_artifacts_and_observation_scores(self):
+        self.plan(max_advisor_calls=0)
+        def execute(task, attempt):
+            result = self.execute(task, attempt)
+            directory = self.plan_path.parent / "trials" / task.id / f"attempt-{attempt:03d}"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "native.requests.jsonl").write_text(json.dumps({
+                "ok": True, "prompt_tokens": 100, "completion_tokens": 100}) + "\n")
+            result["result_path"] = str(directory)
+            return result
+        self.run_plan(executor=execute)
+        state_path = self.plan_path.parent / "tune-state.json"
+        original_state = state_path.read_bytes()
+        state = json.loads(original_state)
+        state["observations"][0]["score"] = 9999
+        state_path.write_text(json.dumps(state))
+        with self.assertRaises(ConfigError):
+            self.run_plan(resume=True)
+        state_path.write_bytes(original_state)
+        usage = next((self.plan_path.parent / "trials").rglob("native.requests.jsonl"))
+        usage.write_text("{}\n")
+        with self.assertRaises(ConfigError):
+            self.run_plan(resume=True)
+
 
 if __name__ == "__main__":
     unittest.main()
