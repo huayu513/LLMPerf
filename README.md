@@ -6,6 +6,15 @@
 
 原来的 `auto` 保持原样。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算；`input_path` 在新模式下可以省略。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
 
+Web 按入口选择模式，不需要业务人员配置 `strategy`：
+
+| 入口 | 搜索策略 | 大模型参与 |
+| --- | --- | --- |
+| 生成 Auto 计划 → 开始搜索 | `strict`，原有规则流程 | 不调用 |
+| 生成智能调优计划 → 开始搜索 | `adaptive`，实测反馈驱动 | 场景解析、规划推荐、搜索过程中的结果分析与下一批选点 |
+
+两个入口可以使用同一份配置；Web 智能调优明确选择 `adaptive`，AUTO 明确选择 `strict`。运行已保存计划时，以计划中的策略为准，不因当前页面或配置改变而切换。
+
 ```json
 "advisor": {
   "base_url": "http://10.64.39.63:54321/v1/chat/completions",
@@ -34,7 +43,7 @@ python3 benchctl.py tune-plan --config configs/experiment.json
 
 模型只提取最大输入 token、最大输出 token、业务并发和 `latency` / `throughput` 优先级。有缺项时返回一个追问，不修改配置；信息完整时平台校验数值并写入 `scenario`，随后每次 run 保存不可变快照。调优默认按输入与输出各三个长度档位的九种组合构造固定请求集；如需沿用 `input_path` 的原始 JSONL，执行 `tune-plan --use-captured`。生成负载时会尝试用目标镜像中的 checkpoint tokenizer 校准输入档位，失败时保留保守近似，并在结果中标明。输出 `max_tokens` 是请求上限，实际输入/输出 token 由压测服务器的 usage 核验；若实际输入超过给定最大值，该试验不能参与选优。
 
-平台按模型、GPU 和镜像能力建立参数目录。默认 `search.strategy: "strict"`：本地大模型只在生成计划时推荐候选，完整候选和执行顺序写入不可变的 `plan.json`。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。规划不启动模型服务进行压测。所有候选在指定业务并发下使用同一固定负载；探索可使用同一小样本子集，最终复验使用完整请求集。吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有明确 SLO 时不会凭空设时延门槛。报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
+平台按模型、GPU 和镜像能力建立参数目录。智能调优默认使用 `adaptive`：候选池写入不可变的 `plan.json`，本地大模型在生成计划时推荐候选，并在搜索过程中分析实测结果、选择下一批候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。规划不启动模型服务进行压测。所有候选在指定业务并发下使用同一固定负载；探索可使用同一小样本子集，最终复验使用完整请求集。吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有明确 SLO 时不会凭空设时延门槛。报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
 
 Web 页面在场景信息不足时保留前文，可直接输入补充信息继续解析；“重新描述”会清空这段对话。
 
@@ -48,11 +57,10 @@ python3 benchctl.py run --plan /path/to/result-dir/plan.json
 
 ### Adaptive：实测反馈驱动选点
 
-第一阶段仅接入 `tune-plan → run`，不接管原来的 `auto`。在原 `experiment.json` 的 `search` 中加入或合并：
+第一阶段仅接入 `tune-plan → run`，不接管原来的 `auto`。Web 智能调优自动启用 Adaptive；CLI 的 `tune-plan` 在未指定策略时也默认 Adaptive，无需修改配置。需要调整预算时，可在原 `experiment.json` 的 `search` 中合并以下可选设置：
 
 ```json
 "search": {
-  "strategy": "adaptive",
   "max_trials": 64,
   "repetitions": 3,
   "adaptive": {
@@ -64,7 +72,7 @@ python3 benchctl.py run --plan /path/to/result-dir/plan.json
 }
 ```
 
-命令仍是 `tune-plan --config ...`，审查计划后执行 `run --plan ...`。默认配置和 Strict 行为不变；直接用 Adaptive 配置执行 `auto` 会明确报错，避免悄悄忽略策略。
+命令仍是 `tune-plan --config ...`，审查计划后执行 `run --plan ...`。CLI 保留显式 `search.strategy` 配置供对比实验，并可通过 `tune-plan --strategy strict` 或 `--strategy adaptive` 覆盖。Strict 智能调优只在规划时调用顾问，候选与顺序固定。Web 的智能调优按钮始终传入 `--strategy adaptive`，AUTO 始终使用原有 Strict 规则流程，即使共用配置中写了 `adaptive` 也不会调用顾问。旧 Strict 计划不会自动升级；需要反馈调优时请重新生成智能调优计划。
 
 - 计划冻结候选池、请求集、业务并发、目标、策略版本和预算，不冻结执行顺序。候选池按基础拓扑与参数族分层生成，并去掉可确定的每实例请求上限等价配置；池大小可以大于实际试验预算。仍只调现有三个参数，不开放任意命令或新增启动参数。
 - 先测基线及代表性配置，每批默认三次探索后调用反馈顾问；首次出现新的失败类型可提前结束批次，进行诊断选点。顾问接收环境摘要、吞吐/P95/TTFT/TPOT、实际配置差异、实际长度、脱敏日志尾部和剩余预算，在最多 24 个合法未测候选的 shortlist 中选择下一批。诊断是待验证假设，不改变结果有效性或 backend 封禁规则。

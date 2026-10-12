@@ -37,9 +37,7 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
                  backend_resolver=None):
     if stop_after not in {'doctor', 'prepare', 'plan', 'auto'}:
         raise ValueError('invalid workflow stage')
-    config = load_config(Path(config_path))
-    if config.search.strategy == 'adaptive':
-        raise ConfigError('adaptive search currently requires tune-plan; auto remains strict')
+    config = load_config(Path(config_path), strategy='strict')
     if config.input_path is None:
         raise ConfigError('auto requires input_path; use tune for a generated scene workload')
     # Fail malformed metadata/requests before any container or GPU allocation.

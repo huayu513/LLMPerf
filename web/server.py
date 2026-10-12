@@ -925,7 +925,7 @@ def run_auto_job(config_path: Path) -> dict[str, Any]:
 
 
 def run_tune_job(config_path: Path, use_captured: bool = False) -> dict[str, Any]:
-    argv = benchctl_argv("tune-plan", "--config", str(config_path))
+    argv = benchctl_argv("tune-plan", "--config", str(config_path), "--strategy", "adaptive")
     if use_captured:
         argv.append("--use-captured")
     return JOBS.create_subprocess("tune-plan", argv, LLMPERF_ROOT)

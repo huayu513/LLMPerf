@@ -294,14 +294,21 @@ function renderSummary() {
   var strategy = (planMeta.search || {}).strategy || "strict";
   var adaptiveState = (detail.tune_state || {}).adaptive || {};
   var policy = planMeta.adaptive_policy || {};
+  var isTune = summary.workflow_mode === "tune" || planMeta.workflow_mode === "tune";
+  var advisorParticipation = !isTune ? "不调用；使用规则搜索"
+    : strategy === "adaptive" ? (policy.max_advisor_calls === 0
+      ? "仅规划推荐；运行期顾问配额为 0"
+      : "规划推荐 + 实测反馈；顾问不可用时降级规则选点")
+    : "仅规划推荐；搜索阶段不调用（Strict 智能调优计划）";
   var code = detail.code_state || {};
   var rows = (detail.results_index && detail.results_index.rows) || [];
   var validRows = rows.filter(function(row) { return row.status === "VALID"; });
   el("summary-content").className = "";
   el("summary-content").innerHTML = renderKV([
     ["Run", summary.id],
-    ["模式", summary.workflow_mode],
-    ["搜索策略", strategy],
+    ["模式", isTune ? "智能调优" : "AUTO 规则搜索"],
+    ["搜索策略", strategy === "adaptive" ? "adaptive（实测反馈）" : "strict（固定计划）"],
+    ["大模型参与", advisorParticipation],
     ["计划语义", strategy === "adaptive" ? "候选池固定；执行顺序根据实测反馈调整" : "执行候选和顺序固定"],
     ["状态", summary.status],
     ["路径", summary.path],

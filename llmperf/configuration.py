@@ -147,7 +147,8 @@ def _optional_strings(value: Any, label: str) -> tuple[str, ...]:
     return result
 
 
-def _search(value: Any, label: str) -> SearchConfig:
+def _search(value: Any, label: str, *, default_strategy: str = "strict",
+            strategy_override: str | None = None) -> SearchConfig:
     data = _object(value, label)
     _unknown(data, _SEARCH_KEYS, label)
     repetitions = _integer(data.get("repetitions", 3), f"{label}.repetitions", 1)
@@ -183,9 +184,13 @@ def _search(value: Any, label: str) -> SearchConfig:
     )
     if promotion_tolerance >= 1.0:
         raise ConfigError(f"{label}.promotion_tolerance must be < 1.0")
-    strategy = _string(data.get("strategy", "strict"), f"{label}.strategy")
+    strategy = _string(data.get("strategy", default_strategy), f"{label}.strategy")
     if strategy not in {"strict", "adaptive"}:
         raise ConfigError(f"{label}.strategy must be strict or adaptive")
+    if strategy_override is not None:
+        strategy = _string(strategy_override, f"{label}.strategy")
+        if strategy not in {"strict", "adaptive"}:
+            raise ConfigError(f"{label}.strategy must be strict or adaptive")
     adaptive_data = _object(data.get("adaptive", {}), f"{label}.adaptive")
     _unknown(adaptive_data, set(AdaptiveConfig.__dataclass_fields__), f"{label}.adaptive")
     adaptive = AdaptiveConfig(**{
@@ -297,7 +302,8 @@ def validate_advisor(value: Any) -> dict[str, Any]:
     }
 
 
-def load_config(path: Path, *, tuning: bool = False) -> RunConfig:
+def load_config(path: Path, *, tuning: bool = False,
+                default_strategy: str = "strict", strategy: str | None = None) -> RunConfig:
     """Load and validate one JSON run configuration."""
     source_path = Path(path).expanduser().resolve()
     data = _read(source_path)
@@ -347,7 +353,9 @@ def load_config(path: Path, *, tuning: bool = False) -> RunConfig:
         output_dir=output_dir,
         gpu_indexes=gpu_indexes,
         smoke=_boolean(data.get("smoke", False), f"{source_path}: smoke"),
-        search=_search(data.get("search", {}), f"{source_path}: search"),
+        search=_search(data.get("search", {}), f"{source_path}: search",
+                       default_strategy=default_strategy,
+                       strategy_override=strategy),
         warmup=_integer(data.get("warmup", 0), f"{source_path}: warmup", 0),
         request_timeout=_number(
             data.get("request_timeout", 3600.0), f"{source_path}: request_timeout",
