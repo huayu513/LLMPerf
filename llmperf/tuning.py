@@ -507,6 +507,8 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         trial_started = time.monotonic()
         metadata = copy.deepcopy(plan.metadata)
         metadata["candidates"] = candidates
+        if adaptive:
+            metadata["trial_timeout_seconds"] = max(0.01, max_seconds - elapsed())
         try:
             if executor is None:
                 adapter = ReplayAdapter(metadata, root / "trials")

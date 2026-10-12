@@ -741,7 +741,11 @@ class ReplayAdapter:
     def __call__(self, task: PlanTask, attempt: int):
         attempt_dir = self.run_root / task.id / f"attempt-{attempt:03d}"
         spec = self.build_spec(task, attempt, attempt_dir)
-        result = self.runtime.run(spec, attempt_dir / "docker.log")
+        timeout = self.metadata.get("trial_timeout_seconds")
+        result = (self.runtime.run(spec, attempt_dir / "docker.log") if timeout is None else
+                  self.runtime.run(spec, attempt_dir / "docker.log", timeout_seconds=timeout))
+        if result.exit_code == 124:
+            (attempt_dir / "container-timeout").write_text("1\n", encoding="utf-8")
         self._write_server_reproduce_script(spec, attempt_dir)
         inspect = getattr(result, "inspect", {})
         state = inspect.get("State", {}) if isinstance(inspect, Mapping) else {}
@@ -818,6 +822,9 @@ def read_attempt(
         "evidence_fingerprint": _evidence_fingerprint(artifact_dir, summary_path, attempt_path),
     }
     reasons: list[str] = result["reasons"]
+    if (attempt_path / "container-timeout").is_file():
+        result["failure_kind"] = "timeout"
+        reasons.append("trial_deadline_exceeded")
     oom_marker = attempt_path / "container-oom-killed"
     oom_logs = _oom_log_paths(attempt_path)
     if oom_marker.is_file() or oom_logs:
