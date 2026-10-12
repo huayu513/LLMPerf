@@ -115,7 +115,7 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     return {**report, 'result_dir': str(root)}
 
 
-def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment):
+def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment, advisor=None):
     path = Path(path).resolve()
     plan = load_plan(path)
     metadata = plan.metadata
@@ -168,7 +168,7 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
         raise ConfigError('GPU driver changed since planning; generate a new plan')
     if metadata.get('workflow_mode') == 'tune':
         from .tuning import execute_tuning_plan
-        report = execute_tuning_plan(plan, root, executor=executor, resume=resume)
+        report = execute_tuning_plan(plan, root, executor=executor, resume=resume, advisor=advisor)
     else:
         report = execute_search(plan, root, executor=executor, resume=resume)
     return {**report, 'result_dir': str(root)}

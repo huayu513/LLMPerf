@@ -15,7 +15,7 @@ from typing import Any
 
 from .adapters import ReplayAdapter, read_attempt
 from .advisor import LocalAdvisor, runtime_advisor_spec
-from .adaptive import build_candidate_pool
+from .adaptive import AdaptiveScheduler, build_candidate_pool
 from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
@@ -386,11 +386,12 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
 
 
 def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
-                        resume: bool = False) -> dict:
-    """Measure a saved scene plan. This path has no advisor or config-file dependency."""
+                        resume: bool = False, advisor=None) -> dict:
+    """Measure a frozen scene plan using its approved search strategy."""
     if plan.metadata.get("workflow_mode") != "tune" or not plan.candidates:
         raise ConfigError("saved plan is not a complete intelligent tuning plan")
     root = Path(run_root)
+    adaptive = plan.metadata["search"].get("strategy", "strict") == "adaptive"
     identity = fingerprint(plan_to_dict(plan))
     state_path = root / "tune-state.json"
     if state_path.exists():
@@ -399,7 +400,7 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         state = json.loads(state_path.read_text(encoding="utf-8"))
         if state.get("plan_hash") != identity:
             raise ConfigError("saved plan changed since tuning started")
-        if state.get("phase") in {"complete", "inconclusive"} and (root / "best.json").is_file():
+        if not adaptive and state.get("phase") in {"complete", "inconclusive"} and (root / "best.json").is_file():
             return json.loads((root / "best.json").read_text(encoding="utf-8"))
     else:
         state = {"version": 2, "plan_hash": identity, "phase": "explore",
@@ -429,9 +430,27 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
 
     def used() -> int:
         return sum(1 for entries in state["trials"].values() for entry in entries
-                   if entry.get("completed") is True)
+                   if adaptive or entry.get("completed") is True)
 
-    def one_trial(candidate_id: str, run_class: str, suffix: str = "") -> dict:
+    scheduler = None
+    if adaptive:
+        for entries in state["trials"].values():
+            for entry in entries:
+                if not (root / entry["manifest"]).resolve().is_relative_to((root / "trials").resolve()):
+                    raise ConfigError("adaptive trial path is outside its run")
+                if entry.get("completed"):
+                    path = root / entry["manifest"]
+                    if (not path.resolve().is_relative_to((root / "trials").resolve()) or
+                            not path.is_file() or sha256_file(path) != entry["sha256"]):
+                        raise ConfigError("recorded adaptive trial evidence changed")
+        scheduler = AdaptiveScheduler(plan.metadata, candidates, root, state, save, advisor=advisor)
+        if state["phase"] in {"complete", "inconclusive"}:
+            report_path = root / "best.json"
+            if not report_path.is_file() or sha256_file(report_path) != state.get("report_sha256"):
+                raise ConfigError("recorded adaptive report changed")
+            return json.loads(report_path.read_text(encoding="utf-8"))
+
+    def one_trial(candidate_id: str, run_class: str, suffix: str = "") -> dict | None:
         task_id = f"{candidate_id}-{run_class}-c{target}{suffix}"
         entries = state["trials"].setdefault(task_id, [])
         for entry in reversed(entries):
@@ -440,6 +459,21 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                 if path.is_file() and sha256_file(path) == entry["sha256"]:
                     return json.loads(path.read_text(encoding="utf-8"))
                 raise ConfigError(f"recorded trial evidence changed: {path}")
+        if adaptive:
+            for entry in entries:
+                path = root / entry["manifest"]
+                if path.is_file():
+                    result = json.loads(path.read_text(encoding="utf-8"))
+                    if (result.get("task_id") != task_id or result.get("candidate_id") != candidate_id
+                            or result.get("candidate_hash") != candidates[candidate_id]["config_hash"]
+                            or result.get("concurrency") != target or result.get("run_class") != run_class
+                            or result.get("score") != _metric(result, scene["priority"])):
+                        raise ConfigError("interrupted trial has invalid result identity")
+                    entry.update(completed=True, sha256=sha256_file(path))
+                    save()
+                    return result
+            if used() >= limit or elapsed() >= max_seconds:
+                return None
         attempt = len(entries) + 1
         task = PlanTask(task_id, 5 if run_class == "final_repeat" else 3,
                         candidate_id, run_class=run_class, concurrency=target,
@@ -447,6 +481,7 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         path = root / "trials" / task_id / f"attempt-{attempt:03d}" / "trial.json"
         entries.append({"manifest": str(path.relative_to(root)), "completed": False})
         save()
+        trial_started = time.monotonic()
         metadata = copy.deepcopy(plan.metadata)
         metadata["candidates"] = candidates
         try:
@@ -463,11 +498,17 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                 result = dict(executor(task, attempt))
         except Exception as exc:
             result = {"status": "FAILED", "reasons": [f"{type(exc).__name__}: {exc}"]}
+        finally:
+            if adaptive:
+                save()
         result.update(task_id=task_id, candidate_id=candidate_id, concurrency=target,
                       run_class=run_class, candidate_hash=task.candidate_hash,
                       attempt=attempt)
         _result_length_evidence(result, scene)
         result["score"] = _metric(result, scene["priority"])
+        if adaptive:
+            result["trial_seconds"] = time.monotonic() - trial_started
+            result = redact(result, scheduler.secrets)
         write_json_atomic(path, result)
         entries[-1] = {"manifest": str(path.relative_to(root)),
                        "sha256": sha256_file(path), "completed": True}
@@ -475,7 +516,67 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         collect_results(root)
         return result
 
-    while state["phase"] == "explore" and state["next_index"] < len(candidate_ids):
+    def observe(result):
+        candidate_id = result["candidate_id"]
+        if not any(row["candidate_id"] == candidate_id for row in state["observations"]):
+            entry = next(entry for entry in reversed(state["trials"][result["task_id"]]) if entry["completed"])
+            observation = {key: result[key] for key in
+                           ("candidate_id", "task_id", "score", "status", "output_tokens_per_second",
+                            "latency_seconds", "ttft_seconds", "tpot_seconds", "reasons",
+                            "failure_kind", "failure_phase", "effective_static_config", "trial_seconds")
+                           if key in result}
+            observation.update(evidence={"manifest": entry["manifest"], "sha256": entry["sha256"]},
+                               evidence_summary=scheduler.summary(result, candidate_id))
+            state["observations"].append(observation)
+            scheduler.consume(candidate_id, result)
+            save()
+
+    def estimated_repeat_seconds():
+        durations = [row["trial_seconds"] for row in state["observations"] if row.get("trial_seconds", 0) > 0]
+        request_limit = limits.get("explore_request_limit", 0)
+        ratio = max(1, plan.metadata["expected_request_count"] / request_limit) if request_limit else 1
+        return max(durations[-6:], default=0) * ratio
+
+    if adaptive and state["phase"] == "explore":
+        for task_id, entries in list(state["trials"].items()):
+            for entry in entries:
+                path = root / entry["manifest"]
+                if not entry.get("completed") and path.is_file():
+                    orphan = json.loads(path.read_text(encoding="utf-8"))
+                    candidate_id = orphan.get("candidate_id")
+                    run_class = orphan.get("run_class")
+                    prefix = f"{candidate_id}-{run_class}-c{target}"
+                    if (candidate_id not in candidates or run_class not in {"tuning", "final_repeat"}
+                            or orphan.get("task_id") != task_id or not task_id.startswith(prefix)):
+                        raise ConfigError("interrupted trial has invalid task identity")
+                    one_trial(candidate_id, run_class, task_id[len(prefix):])
+                if entry.get("completed"):
+                    result = json.loads((root / entry["manifest"]).read_text(encoding="utf-8"))
+                    if result["run_class"] == "tuning":
+                        observe(result)
+        reserve = plan.metadata["planning"]["reserved_final_trials"]
+        while state["phase"] == "explore":
+            available = limit - reserve - used()
+            if available <= 0:
+                state["decisions"].append({"reason": "exploration_trial_budget_exhausted"})
+                break
+            time_available = max_seconds - elapsed() - reserve * estimated_repeat_seconds()
+            if time_available <= 0:
+                state["decisions"].append({"reason": "time_reserved_for_final_verification"})
+                break
+            pending = scheduler.next_batch(available, min(30, time_available), time_available)
+            if not pending:
+                state["decisions"].append({"reason": "candidate_pool_exhausted"})
+                break
+            if max_seconds - elapsed() <= reserve * estimated_repeat_seconds():
+                state["decisions"].append({"reason": "time_reserved_for_final_verification"})
+                break
+            result = one_trial(pending[0], "tuning")
+            if result is None:
+                break
+            observe(result)
+
+    while not adaptive and state["phase"] == "explore" and state["next_index"] < len(candidate_ids):
         if used() >= limit - 2 * repetitions:
             state["decisions"].append({"reason": "exploration_trial_budget_exhausted"})
             break
@@ -515,6 +616,8 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         if not (len(repeats) == repetitions and all(score is not None for score in scores)
                 and all(row.get("effective_static_config") == effective for row in repeats)):
             return None
+        if adaptive and any(_metric(row, "throughput") is None for row in repeats):
+            return None
         median = statistics.median(scores)
         planned = candidates[candidate_id]
         configuration = copy.deepcopy(planned)
@@ -534,7 +637,21 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                 "scene_lengths": [row.get("scene_lengths") for row in repeats]}
 
     best = None
-    if ranked:
+    if adaptive:
+        if "finalist_ids" not in state:
+            tolerance = float(limits.get("promotion_tolerance", 0.05))
+            finalists = [row for row in ranked if
+                         (ranked[0]["score"] - row["score"]) <= max(abs(ranked[0]["score"]), 1e-9) * tolerance]
+            state["finalist_ids"] = [row["candidate_id"] for row in
+                                     finalists[:plan.metadata["adaptive_policy"]["final_top_k"]]]
+            save()
+        for candidate_id in state["finalist_ids"]:
+            repeats = [result for index in range(repetitions)
+                       if (result := one_trial(candidate_id, "final_repeat", f"-adaptive-r{index + 1}")) is not None]
+            candidate_best = verified(candidate_id, repeats)
+            if candidate_best and (best is None or candidate_best["score"] > best["score"]):
+                best = candidate_best
+    elif ranked:
         finalist = ranked[0]
         repeats = [one_trial(finalist["candidate_id"], "final_repeat", f"-r{i + 1}")
                    for i in range(repetitions) if used() < limit and elapsed() < max_seconds]
@@ -546,8 +663,12 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
             baseline_validated = {"candidate_id": baseline_id,
                                   "metric_value": best["metric_value"], "repetitions": repetitions}
         else:
-            repeats = [one_trial(baseline_id, "final_repeat", f"-baseline-r{i + 1}")
-                       for i in range(repetitions) if used() < limit and elapsed() < max_seconds]
+            if adaptive:
+                repeats = [result for index in range(repetitions)
+                           if (result := one_trial(baseline_id, "final_repeat", f"-adaptive-r{index + 1}")) is not None]
+            else:
+                repeats = [one_trial(baseline_id, "final_repeat", f"-baseline-r{i + 1}")
+                           for i in range(repetitions) if used() < limit and elapsed() < max_seconds]
             baseline_best = verified(baseline_id, repeats)
             if baseline_best:
                 baseline_validated = {"candidate_id": baseline_id,
@@ -569,8 +690,27 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
               "trials": used(), "advisor_calls": plan.metadata["planning"]["advisor_calls"],
               "stop_reasons": state["decisions"],
               "length_note": "max_tokens is an upper bound; compare observed server usage in each trial"}
+    if adaptive:
+        baseline_metric = baseline_validated["metric_value"] if baseline_validated else None
+        improvement = None
+        if best and baseline_metric:
+            improvement = ((best["metric_value"] - baseline_metric) / baseline_metric
+                           if scene["priority"] == "throughput" else
+                           (baseline_metric - best["metric_value"]) / baseline_metric)
+        comparison["relative_improvement"] = improvement
+        report.update(strategy="adaptive", adaptive={
+            "advisor_calls": scheduler.progress["advisor_calls"],
+            "max_advisor_calls": plan.metadata["adaptive_policy"]["max_advisor_calls"],
+            "decision_records": scheduler.progress["records"],
+            "finalist_ids": state["finalist_ids"],
+            "baseline_verified": baseline_validated is not None,
+            "elapsed_seconds": elapsed(),
+        })
+        report = _jsonable(report)
     write_json_atomic(root / "best.json", report)
     collect_results(root)
     state["phase"] = "complete" if best else "inconclusive"
+    if adaptive:
+        state["report_sha256"] = sha256_file(root / "best.json")
     save()
     return report

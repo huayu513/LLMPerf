@@ -192,7 +192,7 @@ class AdaptiveScheduler:
             ordered = [baseline] + [ident for ident in ordered if ident != baseline]
         return ordered[:24]
 
-    def _payload(self, shortlist, batch_size, remaining_trials):
+    def _payload(self, shortlist, batch_size, remaining_trials, remaining_seconds):
         observations = self.state["observations"]
         ranked = sorted((row for row in observations if row.get("score") is not None),
                         key=lambda row: row["score"], reverse=True)
@@ -210,6 +210,7 @@ class AdaptiveScheduler:
             "evidence": [row["evidence"] for row in observations],
             "shortlist": [candidate_summary(self.candidates[ident]) for ident in shortlist],
             "remaining_trials": remaining_trials,
+            "remaining_seconds": remaining_seconds,
             "remaining_advisor_calls": self.policy["max_advisor_calls"] - self.progress["advisor_calls"],
             "batch_size": batch_size,
         }, self.secrets)
@@ -254,7 +255,7 @@ class AdaptiveScheduler:
         self.save()
         return self.progress["pending"]
 
-    def next_batch(self, remaining_trials: int, timeout_seconds: float):
+    def next_batch(self, remaining_trials: int, timeout_seconds: float, remaining_seconds=None):
         remaining = self.remaining()
         self.progress["pending"] = [ident for ident in self.progress["pending"] if ident in remaining]
         if self.progress["pending"]:
@@ -274,7 +275,8 @@ class AdaptiveScheduler:
             return []
         shortlist = self._shortlist(remaining)
         batch_size = min(self.policy["batch_size"], remaining_trials, len(shortlist))
-        payload = self._payload(shortlist, batch_size, remaining_trials)
+        payload = self._payload(shortlist, batch_size, remaining_trials,
+                                timeout_seconds if remaining_seconds is None else remaining_seconds)
         bootstrap = not self.state["observations"]
         can_ask = (not bootstrap and self.progress["advisor_calls"] < self.policy["max_advisor_calls"])
         entry = {"id": len(self.progress["records"]) + 1, "sha256": None,
@@ -296,7 +298,10 @@ class AdaptiveScheduler:
                 if isinstance(client, LocalAdvisor):
                     client = LocalAdvisor({**client.settings, "timeout_seconds": min(
                         float(client.settings["timeout_seconds"]), max(0.01, timeout_seconds))})
-                reply = client.ask("next_experiments", payload)
+                try:
+                    reply = client.ask("next_experiments", payload)
+                finally:
+                    self.save()
                 selected, rejected, diagnosis = self._validate_reply(reply, payload)
                 document.update(response=redact(reply, self.secrets), validation_rejections=rejected,
                                 diagnosis=redact(diagnosis, self.secrets))
