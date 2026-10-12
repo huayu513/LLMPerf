@@ -599,7 +599,7 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
             if time_available <= 0:
                 state["decisions"].append({"reason": "time_reserved_for_final_verification"})
                 break
-            pending = scheduler.next_batch(available, min(30, time_available), time_available)
+            pending = scheduler.next_batch(available, min(300, time_available), time_available)
             if not pending:
                 state["decisions"].append({"reason": "candidate_pool_exhausted"})
                 break

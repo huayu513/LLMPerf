@@ -14,9 +14,15 @@
   },
   "advisor": {
     "base_url": "http://10.64.39.63:54321/v1/chat/completions",
-    "model": "s1-model",
-    "model_pool": "dsv41",
-    "timeout_seconds": 300,
-    "authorization": "Bearer "
+    "model": "DeepSeek-V4-Flash-Local",
+    "api_key_env": "API_KEY",
+    "timeout_seconds": 1000,
+    "thinking": true,
+    "task_max_tokens": {
+      "scene": 100000,
+      "candidates": 100000,
+      "explain": 100000,
+      "next_experiments": 100000
+    }
   }
 }

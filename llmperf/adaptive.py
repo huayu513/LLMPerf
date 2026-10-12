@@ -107,7 +107,7 @@ class AdaptiveScheduler:
         self.advisor_error = None
         if advisor is None and self.policy["max_advisor_calls"]:
             try:
-                self.advisor = load_runtime_advisor(metadata["runtime_advisor"], 30)
+                self.advisor = load_runtime_advisor(metadata["runtime_advisor"], 300)
             except (ConfigError, KeyError, TypeError, ValueError):
                 self.advisor_error = "runtime_advisor_unavailable"
         settings = getattr(self.advisor, "settings", {})

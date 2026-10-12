@@ -9,14 +9,22 @@
 ```json
 "advisor": {
   "base_url": "http://10.64.39.63:54321/v1/chat/completions",
-  "model": "s1-model",
-  "model_pool": "dsv41",
-  "timeout_seconds": 300,
-  "authorization": "Bearer <接口令牌>"
+  "model": "DeepSeek-V4-Flash-Local",
+  "api_key_env": "API_KEY",
+  "timeout_seconds": 1000,
+  "thinking": true,
+  "task_max_tokens": {
+    "scene": 100000,
+    "candidates": 100000,
+    "explain": 100000,
+    "next_experiments": 100000
+  }
 }
 ```
 
-顾问请求会发送配置中的 `Authorization: Bearer <令牌>`、`Content-Type: application/json`、`X-Model-Pool: dsv41`，请求体固定带 `reasoning_effort: "none"`、`chat_template_kwargs: {"thinking": false}`、`temperature: 0` 和 `stream: false`。场景解析与初始推荐默认 `max_tokens: 64`，Adaptive 反馈选点默认 1024；可通过 `advisor.task_max_tokens` 按任务覆盖。也可用 `"api_key_env": "LLMPERF_ADVISOR_KEY"` 代替 `authorization`，从环境变量生成相同的 Bearer Header。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
+启动 CLI 或 Web 服务前执行 `export API_KEY='接口令牌'`，环境变量只放令牌，不带 `Bearer ` 前缀。顾问请求会发送 `Authorization: Bearer <令牌>` 和 `Content-Type: application/json`；只有配置了非空 `model_pool` 才发送 `X-Model-Pool`。也兼容配置中的 `authorization`，该字段优先于环境变量。
+
+请求体带 `temperature: 0` 和 `stream: false`。`advisor.thinking: true` 发送 `chat_template_kwargs: {"thinking": true}`，并省略关闭思考的 `reasoning_effort: "none"`；不配置 `thinking` 时保持原来的关闭行为。上述配置把所有顾问任务的 `max_tokens` 上限设为 100000；未覆盖时，场景解析、初始推荐和解释默认 64，Adaptive 反馈选点默认 1024。上限不保证实际生成长度，服务端限制仍然生效。场景解析与规划调用使用 `advisor.timeout_seconds`，上述配置为 1000 秒；Adaptive 运行期单次调用最多 300 秒，同时受更短的配置超时和剩余探索时间限制。修改这些设置后需要重新生成计划，旧计划恢复不会自动切换。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
 
 ```bash
 python3 benchctl.py scenario --config configs/experiment.json \
@@ -61,7 +69,7 @@ python3 benchctl.py run --plan /path/to/result-dir/plan.json
 - 计划冻结候选池、请求集、业务并发、目标、策略版本和预算，不冻结执行顺序。候选池按基础拓扑与参数族分层生成，并去掉可确定的每实例请求上限等价配置；池大小可以大于实际试验预算。仍只调现有三个参数，不开放任意命令或新增启动参数。
 - 先测基线及代表性配置，每批默认三次探索后调用反馈顾问；首次出现新的失败类型可提前结束批次，进行诊断选点。顾问接收环境摘要、吞吐/P95/TTFT/TPOT、实际配置差异、实际长度、脱敏日志尾部和剩余预算，在最多 24 个合法未测候选的 shortlist 中选择下一批。诊断是待验证假设，不改变结果有效性或 backend 封禁规则。
 - 超时、凭据缺失、输出越界或重复、调用配额耗尽时，确定性规则接管选点。`max_advisor_calls: 0` 关闭运行期顾问，便于比较规则自适应；它不关闭规划阶段的初始推荐。每批最多八个候选，`final_top_k` 最多五个。
-- 规划预留 `(final_top_k + 1) × repetitions` 次试验，分别用于近优候选和基线复验，另外至少允许两次探索。相同候选不重复复验。探索根据已观测耗时估算并预留复验时间；顾问等待计入总时间，运行期单次请求最多等待 30 秒或更短的剩余探索时间。原生 Docker trial 到总截止时间会终止并定向清理，容器清理可能产生少量额外耗时。
+- 规划预留 `(final_top_k + 1) × repetitions` 次试验，分别用于近优候选和基线复验，另外至少允许两次探索。相同候选不重复复验。探索根据已观测耗时估算并预留复验时间；顾问等待计入总时间，运行期单次请求最多等待 300 秒或更短的配置超时、剩余探索时间。原生 Docker trial 到总截止时间会终止并定向清理，容器清理可能产生少量额外耗时。
 - 最终赢家只由完整负载复验决定。只有基线也通过复验，`best.json.comparison.relative_improvement` 才给出相对改善；否则为 `null`。所有失败和中断分配都占试验配额，恢复不会无限免费重试。
 
 Adaptive 的 `plan.json` 不保存令牌。运行期优先使用 `advisor.api_key_env` 指定的环境变量，未指定时尝试 `LLMPERF_ADVISOR_KEY`；兼容配置中的 `authorization`，只读取该字段，不重新加载场景、候选或预算。认证不可用时降级规则，不阻止压测。运行期端点、模型和其他请求设置使用计划中的不可变快照。请避免顾问服务和被测服务共享 GPU；顾问只在试验间隙调用，但共享显存或后台 GPU 活动仍可能干扰结果。

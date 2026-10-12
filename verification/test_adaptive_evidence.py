@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmperf.advisor import LocalAdvisor, load_runtime_advisor, runtime_advisor_spec
+from llmperf.configuration import validate_advisor
 from llmperf.evidence import redact, summarize_trial
 from llmperf.errors import ConfigError
 
@@ -25,6 +26,44 @@ class AdvisorEvidenceTests(unittest.TestCase):
             LocalAdvisor({"base_url": "http://localhost/v1", "model": "local",
                           "timeout_seconds": 5}).ask("next_experiments", {})
         self.assertEqual(captured["max_tokens"], 1024)
+
+    def test_thinking_and_all_token_budgets_apply_to_planning_and_runtime(self):
+        tasks = ("scene", "candidates", "explain", "next_experiments")
+        settings = validate_advisor({
+            "base_url": "http://localhost/v1/chat/completions",
+            "model": "DeepSeek-V4-Flash-Local",
+            "api_key_env": "API_KEY",
+            "timeout_seconds": 1000,
+            "thinking": True,
+            "task_max_tokens": {task: 100000 for task in tasks},
+        })
+        spec = runtime_advisor_spec(settings, Path("config.json"))
+        self.assertIs(spec["thinking"], True)
+        self.assertEqual(spec["task_max_tokens"], settings["task_max_tokens"])
+        captured = {}
+
+        class Opener:
+            def open(self, request, timeout):
+                captured["body"] = json.loads(request.data)
+                captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+                captured["timeout_seconds"] = timeout
+                return io.BytesIO(b'{"choices":[{"message":{"reasoning_content":"analysis","content":"{}"}}]}')
+
+        with patch("llmperf.advisor.urllib.request.build_opener", return_value=Opener()), \
+             patch.dict("os.environ", {"API_KEY": "test-token"}):
+            advisors = (LocalAdvisor(settings), load_runtime_advisor(spec, 300))
+            for phase, advisor in zip(("planning", "runtime"), advisors):
+                for task in tasks:
+                    with self.subTest(phase=phase, task=task):
+                        self.assertEqual(advisor.ask(task, {}), {})
+                        self.assertEqual(captured["body"]["chat_template_kwargs"], {"thinking": True})
+                        self.assertEqual(captured["body"]["max_tokens"], 100000)
+                        self.assertEqual(captured["body"]["model"], "DeepSeek-V4-Flash-Local")
+                        self.assertNotIn("reasoning_effort", captured["body"])
+                        self.assertIs(captured["body"]["stream"], False)
+                        self.assertEqual(captured["headers"]["authorization"], "Bearer test-token")
+                        self.assertNotIn("x-model-pool", captured["headers"])
+                        self.assertEqual(captured["timeout_seconds"], 1000 if phase == "planning" else 300)
 
     def test_credentials_are_not_saved_and_only_auth_is_reloaded(self):
         with tempfile.TemporaryDirectory() as directory:

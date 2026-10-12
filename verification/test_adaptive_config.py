@@ -42,6 +42,14 @@ class AdaptiveConfigurationTests(unittest.TestCase):
             with self.subTest(budgets=budgets), self.assertRaises(ConfigError):
                 validate_advisor({**settings, "task_max_tokens": budgets})
 
+    def test_thinking_is_optional_and_requires_a_boolean(self):
+        settings = {"base_url": "http://localhost:9000/v1", "model": "local"}
+        self.assertIs(validate_advisor(settings)["thinking"], False)
+        self.assertIs(validate_advisor({**settings, "thinking": True})["thinking"], True)
+        for thinking in ("true", 1, None):
+            with self.subTest(thinking=thinking), self.assertRaises(ConfigError):
+                validate_advisor({**settings, "thinking": thinking})
+
 
 if __name__ == "__main__":
     unittest.main()

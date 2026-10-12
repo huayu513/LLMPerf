@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from adaptive_fixtures import EmptyPlanningAdvisor, environment, write_config
+from llmperf.adaptive import AdaptiveScheduler
 from llmperf.artifacts import sha256_file, write_json_atomic
 from llmperf.errors import ConfigError
 from llmperf.tuning import plan_tuning
@@ -74,6 +75,16 @@ class AdaptiveExecutionTests(unittest.TestCase):
         self.assertEqual(state["adaptive"]["pending"], [])
         self.assertNotIn("test-token", (self.plan_path.parent / "best.json").read_text())
         self.assertEqual(self.run_plan(resume=True)["best"], report["best"])
+
+    def test_feedback_timeout_uses_300_seconds_or_remaining_exploration_budget(self):
+        self.plan()
+        with patch("llmperf.tuning.AdaptiveScheduler.next_batch", autospec=True,
+                   side_effect=AdaptiveScheduler.next_batch) as select_batch:
+            self.run_plan()
+        self.assertTrue(select_batch.call_args_list)
+        self.assertTrue(any(call.args[2] > 30 for call in select_batch.call_args_list))
+        for call in select_batch.call_args_list:
+            self.assertEqual(call.args[2], min(300, call.args[3]))
 
     def test_failure_triggers_diagnosis_without_claiming_baseline_gain(self):
         self.plan()

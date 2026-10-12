@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import patch
 
 from adaptive_fixtures import SCENE
 from llmperf.adaptive import AdaptiveScheduler
@@ -58,6 +59,26 @@ class SchedulerTests(unittest.TestCase):
         document = json.loads((self.root / "decisions/000002.json").read_text())
         self.assertEqual(document["source"], "advisor")
         self.assertEqual(document["selected"], batch)
+
+    def test_runtime_timeout_is_capped_at_300_and_remaining_budget(self):
+        self.metadata["runtime_advisor"] = {
+            "base_url": "http://localhost/v1", "model": "local", "timeout_seconds": 1000,
+        }
+        scheduler = self.bootstrap()
+        self.assertEqual(scheduler.advisor.settings["timeout_seconds"], 300)
+        captured = []
+
+        def reply(client, task, payload):
+            captured.append(client.settings["timeout_seconds"])
+            return {"next_candidates": [{"candidate_id": payload["shortlist"][-1]["candidate_id"]}]}
+
+        with patch("llmperf.adaptive.LocalAdvisor.ask", autospec=True, side_effect=reply):
+            for remaining_seconds in (1000, 7):
+                with self.subTest(remaining_seconds=remaining_seconds):
+                    batch = scheduler.next_batch(6, remaining_seconds)
+                    self.assertEqual(captured[-1], min(300, remaining_seconds))
+                    for ident in list(batch):
+                        self.observe(scheduler, ident)
 
     def test_unknown_duplicate_and_control_fields_fall_back(self):
         class Advisor:

@@ -71,19 +71,22 @@ class LocalAdvisor:
         }
         if task not in instructions:
             raise ValueError(f"unknown advisor task: {task}")
-        body = json.dumps({
+        thinking = self.settings.get("thinking", False)
+        request_body = {
             "model": self.settings["model"],
             "messages": [
                 {"role": "user", "content": instructions[task] + "\n\n" +
                  json.dumps(payload, ensure_ascii=False)},
             ],
-            "reasoning_effort": "none",
-            "chat_template_kwargs": {"thinking": False},
+            "chat_template_kwargs": {"thinking": thinking},
             "max_tokens": self.settings.get("task_max_tokens", {}).get(
                 task, 1024 if task == "next_experiments" else 64),
             "temperature": 0,
             "stream": False,
-        }, ensure_ascii=False).encode("utf-8")
+        }
+        if not thinking:
+            request_body["reasoning_effort"] = "none"
+        body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.settings.get("model_pool"):
             headers["X-Model-Pool"] = self.settings["model_pool"]
@@ -133,7 +136,7 @@ def extract_and_save_scenario(config_path: str | Path, description: str,
 
 def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:
     return {key: settings[key] for key in
-            ("base_url", "model", "model_pool", "timeout_seconds", "task_max_tokens")
+            ("base_url", "model", "model_pool", "timeout_seconds", "thinking", "task_max_tokens")
             if key in settings} | {
         "api_key_env": settings.get("api_key_env") or "LLMPERF_ADVISOR_KEY",
         "credential_file": str(config_path) if settings.get("authorization") else None,
@@ -143,7 +146,7 @@ def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:
 
 def load_runtime_advisor(spec: dict, timeout_seconds: float) -> LocalAdvisor:
     settings = {key: spec[key] for key in
-                ("base_url", "model", "model_pool", "task_max_tokens") if key in spec}
+                ("base_url", "model", "model_pool", "thinking", "task_max_tokens") if key in spec}
     settings["timeout_seconds"] = min(float(spec["timeout_seconds"]), timeout_seconds)
     env_name = spec.get("api_key_env", "LLMPERF_ADVISOR_KEY")
     if os.environ.get(env_name):
