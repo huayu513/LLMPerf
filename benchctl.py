@@ -43,8 +43,10 @@ def main(argv=None):
     scene = sub.add_parser('scenario', help='parse a natural-language scene and write it to experiment.json')
     scene.add_argument('--config', required=True)
     scene.add_argument('--describe', required=True, help='input/output token maxima, business concurrency and priority')
-    tune = sub.add_parser('tune-plan', help='save a complete scene-driven plan without benchmarking')
+    tune = sub.add_parser('tune-plan', help='save an adaptive scene-driven plan without benchmarking')
     tune.add_argument('--config', required=True)
+    tune.add_argument('--strategy', choices=('strict', 'adaptive'),
+                      help='override search.strategy; scene tuning defaults to adaptive')
     tune.add_argument('--use-captured', action='store_true', help='use input_path JSONL instead of a generated scene workload')
     args = parser.parse_args(argv)
     try:
@@ -58,7 +60,8 @@ def main(argv=None):
         elif args.command == 'scenario':
             result = extract_and_save_scenario(args.config, args.describe)
         elif args.command == 'tune-plan':
-            result = plan_tuning(args.config, use_captured=args.use_captured)
+            result = plan_tuning(args.config, use_captured=args.use_captured,
+                                 strategy=args.strategy)
         else:
             result = run_workflow(args.config, stop_after=args.command)
         # Detailed measurements stay in best.json; stdout keeps the usable result.

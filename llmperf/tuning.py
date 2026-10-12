@@ -20,7 +20,7 @@ from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
-from .configuration import load_config
+from .configuration import RunConfig, load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .errors import ConfigError
@@ -183,9 +183,8 @@ def _calibrate_scene(root: Path, config, model, scene: dict) -> dict:
         return result
 
 
-def _prepare_new_run(config_path: Path, *, use_captured: bool, probe,
+def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool, probe,
                      calibrate: bool) -> tuple[Path, Plan, dict]:
-    config = load_config(config_path, tuning=True)
     if config.scenario is None:
         raise ConfigError("scenario is missing; describe the scene before tune")
     if config.advisor is None:
@@ -262,10 +261,11 @@ def _prepare_new_run(config_path: Path, *, use_captured: bool, probe,
 
 def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
                 probe=probe_environment, advisor: LocalAdvisor | None = None,
-                calibrate: bool = True) -> dict:
+                calibrate: bool = True, strategy: str | None = None) -> dict:
     """Freeze a scene workload and all search candidates without benchmarking."""
     config_path = Path(config_path).expanduser().resolve()
-    config = load_config(config_path, tuning=True)
+    config = load_config(config_path, tuning=True, default_strategy="adaptive",
+                         strategy=strategy)
     source_hash = sha256_file(config_path)
     if config.scenario is None or config.advisor is None:
         raise ConfigError("intelligent planning requires scenario and advisor in experiment.json")
@@ -275,7 +275,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
     capacity = config.search.adaptive.candidate_pool_limit if adaptive else exploration_capacity
     if exploration_capacity < 2:
         raise ConfigError("search.max_trials must allow two explorations plus winner and baseline repeats")
-    root, template, catalog = _prepare_new_run(config_path, use_captured=use_captured,
+    root, template, catalog = _prepare_new_run(config_path, config, use_captured=use_captured,
                                                 probe=probe, calibrate=calibrate)
     if sha256_file(config_path) != source_hash:
         raise ConfigError("experiment.json changed during intelligent planning; generate a new plan")
