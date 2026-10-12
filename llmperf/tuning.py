@@ -380,6 +380,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
     resolved["search_scope"] = template.metadata["search_scope"]
     write_json_atomic(resolved_path, resolved)
     return {"command": "tune-plan", "status": "PASS", "result_dir": str(root),
+            "strategy": config.search.strategy,
             "plan": str(root / "plan.json"), "candidates": len(plan.candidates),
             "requests": template.metadata["expected_request_count"],
             "scenario": scene, "advisor_calls": advisor_calls}
@@ -481,6 +482,9 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         path = root / "trials" / task_id / f"attempt-{attempt:03d}" / "trial.json"
         entries.append({"manifest": str(path.relative_to(root)), "completed": False})
         save()
+        if adaptive:
+            print(json.dumps({"event": "trial", "strategy": "adaptive", "task": task_id,
+                              "attempt": attempt, "trial": used(), "max_trials": limit}), flush=True)
         trial_started = time.monotonic()
         metadata = copy.deepcopy(plan.metadata)
         metadata["candidates"] = candidates

@@ -62,7 +62,7 @@ def main(argv=None):
         else:
             result = run_workflow(args.config, stop_after=args.command)
         # Detailed measurements stay in best.json; stdout keeps the usable result.
-        output = {k: result[k] for k in ('status', 'result_dir', 'plan', 'candidates', 'requests', 'rows', 'trials', 'scenario', 'question', 'summary') if k in result}
+        output = {k: result[k] for k in ('status', 'strategy', 'result_dir', 'plan', 'candidates', 'requests', 'rows', 'trials', 'scenario', 'question', 'summary') if k in result}
         if result.get('best'):
             best = result['best']
             output['best'] = {k: best[k] for k in ('candidate_id', 'concurrency', 'priority', 'metric_value', 'output_tokens_per_second', 'repetitions') if k in best}

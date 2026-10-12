@@ -253,6 +253,9 @@ class AdaptiveScheduler:
         entry.pop("input", None)
         self.progress["pending"] = list(document["selected"])
         self.save()
+        print(json.dumps({"event": "adaptive_decision", "decision": entry["id"],
+                          "source": document["source"], "status": document["status"],
+                          "selected": document["selected"]}), flush=True)
         return self.progress["pending"]
 
     def next_batch(self, remaining_trials: int, timeout_seconds: float, remaining_seconds=None):

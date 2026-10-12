@@ -291,6 +291,9 @@ function renderSummary() {
   var best = bestDoc.best || null;
   var planMeta = (detail.plan && detail.plan.metadata) || {};
   var planning = planMeta.planning || {};
+  var strategy = (planMeta.search || {}).strategy || "strict";
+  var adaptiveState = (detail.tune_state || {}).adaptive || {};
+  var policy = planMeta.adaptive_policy || {};
   var code = detail.code_state || {};
   var rows = (detail.results_index && detail.results_index.rows) || [];
   var validRows = rows.filter(function(row) { return row.status === "VALID"; });
@@ -298,6 +301,8 @@ function renderSummary() {
   el("summary-content").innerHTML = renderKV([
     ["Run", summary.id],
     ["模式", summary.workflow_mode],
+    ["搜索策略", strategy],
+    ["计划语义", strategy === "adaptive" ? "候选池固定；执行顺序根据实测反馈调整" : "执行候选和顺序固定"],
     ["状态", summary.status],
     ["路径", summary.path],
     ["候选数", summary.candidate_count],
@@ -305,6 +310,8 @@ function renderSummary() {
     ["计划探索上限", planning.exploration_capacity],
     ["复验预留次数", planning.reserved_final_trials],
     ["顾问规划结果", planning.advisor_calls],
+    ["反馈顾问调用", strategy === "adaptive" ? String(adaptiveState.advisor_calls || 0) + " / " + String(policy.max_advisor_calls) : "执行阶段不调用"],
+    ["待执行反馈候选", adaptiveState.pending],
     ["Trial 数", summary.row_count],
     ["当前阶段", currentStage(state.trials, bestDoc)],
     ["阶段统计", stageSummary(state.trials)],
@@ -316,11 +323,36 @@ function renderSummary() {
     ["选优指标", bestDoc.comparison && bestDoc.comparison.metric],
     ["复验指标值", best && best.metric_value],
     ["基线复验值", bestDoc.comparison && bestDoc.comparison.baseline_validated && bestDoc.comparison.baseline_validated.metric_value],
+    ["相对基线改善", bestDoc.comparison && bestDoc.comparison.relative_improvement],
     ["调优说明", bestDoc.summary],
     ["有效 trial", validRows.length],
     ["代码指纹一致", code.matches],
     ["当前代码 fingerprint", code.current_bundle_fingerprint]
   ]);
+  renderAdaptiveDecisions(detail.adaptive_decisions || [], strategy);
+}
+
+function renderAdaptiveDecisions(rows, strategy) {
+  var box = el("adaptive-decisions");
+  box.hidden = strategy !== "adaptive";
+  if (box.hidden) return;
+  if (!rows.length) {
+    box.innerHTML = '<h3>反馈决策</h3><p class="hint">尚未执行。顾问只选池内候选，最终推荐由实测复验决定。</p>';
+    return;
+  }
+  var html = '<h3>反馈决策</h3><div class="table-wrap"><table><thead><tr><th>轮次</th><th>来源 / 状态</th><th>依据 / 降级原因</th><th>下一批候选</th></tr></thead><tbody>';
+  rows.forEach(function(row) {
+    var diagnosis = row.diagnosis || {};
+    var explanation = diagnosis.hypothesis || row.reason || "";
+    var recommendations = (row.recommendations || []).map(function(item) {
+      return item.candidate_id + ": " + (item.reason || "") + " " + (item.expected_effect || "");
+    }).join("; ");
+    html += '<tr><td>' + escapeHtml(row.id) + '</td><td>' + escapeHtml(row.source) + ' / ' + escapeHtml(row.status) +
+      '</td><td>' + escapeHtml(explanation) + '<div class="small">' + escapeHtml(recommendations) +
+      '</div><div class="small">' + escapeHtml((row.validation_rejections || []).join(", ")) +
+      '</div></td><td class="code">' + escapeHtml((row.selected || []).join(", ")) + '</td></tr>';
+  });
+  box.innerHTML = html + '</tbody></table></div>';
 }
 
 function renderCandidates() {
