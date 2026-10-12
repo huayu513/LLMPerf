@@ -71,6 +71,7 @@ class AdaptiveExecutionTests(unittest.TestCase):
         self.assertEqual(advisor.calls[0]["scenario"]["target_concurrency"], 4)
         state = json.loads((self.plan_path.parent / "tune-state.json").read_text())
         self.assertLessEqual(state["adaptive"]["advisor_calls"], 3)
+        self.assertEqual(state["adaptive"]["pending"], [])
         self.assertNotIn("test-token", (self.plan_path.parent / "best.json").read_text())
         self.assertEqual(self.run_plan(resume=True)["best"], report["best"])
 

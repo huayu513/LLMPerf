@@ -11,6 +11,10 @@ from llmperf.errors import ConfigError
 
 
 class AdvisorEvidenceTests(unittest.TestCase):
+    def test_nonfinite_diagnostics_are_not_sent_as_invalid_json(self):
+        self.assertEqual(redact({"ttft": float("inf"), "tpot": float("nan")}),
+                         {"ttft": None, "tpot": None})
+
     def test_feedback_has_separate_token_budget(self):
         captured = {}
         class Opener:

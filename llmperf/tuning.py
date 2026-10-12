@@ -640,6 +640,10 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                     break
             state["last_batch_best"] = current
             save()
+    if adaptive and scheduler.progress["pending"]:
+        state["decisions"].append({"reason": "exploration_ended_pending_cancelled",
+                                  "cancelled_candidates": list(scheduler.progress["pending"])})
+        scheduler.progress["pending"] = []
     state["phase"] = "final"
     save()
     ranked = sorted((row for row in state["observations"] if row["score"] is not None),

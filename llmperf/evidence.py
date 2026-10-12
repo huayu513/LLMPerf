@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import re
+import math
 from pathlib import Path
 
 
 def redact(value, secrets=()):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if isinstance(value, dict):
         return {key: "[REDACTED]" if key.lower() in
                 {"authorization", "api_key", "password", "secret", "access_token"}
