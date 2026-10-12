@@ -15,6 +15,14 @@ from .types import DockerConfig
 
 
 @dataclass(frozen=True)
+class AdaptiveConfig:
+    candidate_pool_limit: int = 256
+    batch_size: int = 3
+    max_advisor_calls: int = 12
+    final_top_k: int = 2
+
+
+@dataclass(frozen=True)
 class SearchConfig:
     concurrency_max: int = 64
     start_concurrency: int | None = None
@@ -25,6 +33,8 @@ class SearchConfig:
     max_seconds: float = 14400
     backends: tuple[str, ...] | None = None
     open_loop_scales: tuple[float, ...] | None = None
+    strategy: str = "strict"
+    adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
 
 
 @dataclass(frozen=True)
@@ -54,7 +64,7 @@ _TOP_KEYS = {
 _SEARCH_KEYS = {
     "concurrency_max", "start_concurrency", "explore_request_limit",
     "promotion_tolerance", "repetitions", "max_trials", "max_seconds",
-    "backends", "open_loop_scales",
+    "backends", "open_loop_scales", "strategy", "adaptive",
 }
 _DOCKER_KEYS = {"name_prefix", "network_mode", "service_port", "shm_size", "ipc"}
 _LINUX_EPHEMERAL_PORT_RANGE = (32768, 60999)
@@ -173,6 +183,22 @@ def _search(value: Any, label: str) -> SearchConfig:
     )
     if promotion_tolerance >= 1.0:
         raise ConfigError(f"{label}.promotion_tolerance must be < 1.0")
+    strategy = _string(data.get("strategy", "strict"), f"{label}.strategy")
+    if strategy not in {"strict", "adaptive"}:
+        raise ConfigError(f"{label}.strategy must be strict or adaptive")
+    adaptive_data = _object(data.get("adaptive", {}), f"{label}.adaptive")
+    _unknown(adaptive_data, set(AdaptiveConfig.__dataclass_fields__), f"{label}.adaptive")
+    adaptive = AdaptiveConfig(**{
+        key: _integer(adaptive_data.get(key, value), f"{label}.adaptive.{key}",
+                      0 if key == "max_advisor_calls" else 1)
+        for key, value in vars(AdaptiveConfig()).items()
+    })
+    if adaptive.candidate_pool_limit < 2:
+        raise ConfigError(f"{label}.adaptive.candidate_pool_limit must be >= 2")
+    if adaptive.batch_size > 8 or adaptive.final_top_k > 5:
+        raise ConfigError(f"{label}.adaptive requires batch_size <= 8 and final_top_k <= 5")
+    if strategy == "adaptive" and max_trials < (adaptive.final_top_k + 1) * repetitions + 2:
+        raise ConfigError(f"{label}.max_trials must reserve finalist and baseline repeats plus two explorations")
     return SearchConfig(
         concurrency_max=concurrency_max,
         start_concurrency=start_concurrency,
@@ -187,6 +213,8 @@ def _search(value: Any, label: str) -> SearchConfig:
         ),
         backends=backends,
         open_loop_scales=scales,
+        strategy=strategy,
+        adaptive=adaptive,
     )
 
 
@@ -243,7 +271,7 @@ def validate_scenario(value: Any) -> dict[str, Any]:
 
 def validate_advisor(value: Any) -> dict[str, Any]:
     data = _object(value, "advisor")
-    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds"}, "advisor")
+    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds", "task_max_tokens"}, "advisor")
     url = _string(data.get("base_url"), "advisor.base_url").rstrip("/")
     try:
         parts = urlsplit(url)
@@ -254,6 +282,8 @@ def validate_advisor(value: Any) -> dict[str, Any]:
         valid = False
     if not valid:
         raise ConfigError("advisor.base_url must be an HTTP(S) endpoint without credentials or query")
+    budgets = _object(data.get("task_max_tokens", {}), "advisor.task_max_tokens")
+    _unknown(budgets, {"scene", "candidates", "explain", "next_experiments"}, "advisor.task_max_tokens")
     return {
         "base_url": url,
         "model": _string(data.get("model"), "advisor.model"),
@@ -261,6 +291,8 @@ def validate_advisor(value: Any) -> dict[str, Any]:
         "authorization": _string(data.get("authorization", ""), "advisor.authorization", nonempty=False),
         "api_key_env": _string(data.get("api_key_env", ""), "advisor.api_key_env", nonempty=False),
         "timeout_seconds": _number(data.get("timeout_seconds", 60), "advisor.timeout_seconds", 0, strict=True),
+        "task_max_tokens": {key: _integer(value, f"advisor.task_max_tokens.{key}", 1)
+                            for key, value in budgets.items()},
     }
 
 
