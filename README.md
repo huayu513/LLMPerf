@@ -275,7 +275,7 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s verification -v
 ```
 
-`verification/` 包含仓库跟踪的自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 回归测试，均不调用真实顾问或启动 GPU 压测。`tests/` 为本地自测目录；macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
+`tests/` 与 `verification/` 均为本地自测目录，不纳入 Git 跟踪或提交；上述命令仅适用于本地保留这些目录的环境，新克隆的仓库不包含自测代码。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
 
 复制后的目录可以直接运行 `python3 benchctl.py --help`。实际硬件、checkpoint 和镜像的兼容性由目标机器上的环境探测、探索样本和最终完整输入复跑确认。
 
