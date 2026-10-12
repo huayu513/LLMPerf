@@ -323,7 +323,7 @@ def _evidence_fingerprint(artifact_dir: Path, summary_path: Path | None, attempt
 
 def _summary_metric_fields() -> tuple[str, ...]:
     return (
-        "request_count", "successes", "failures", "error_rate",
+        "request_count", "successes", "failures", "error_rate", "measured_seconds",
         "server_usage_available", "server_usage_missing",
         "prompt_tokens", "completion_tokens", "total_tokens",
         "input_tokens_per_second", "total_tokens_per_second",
