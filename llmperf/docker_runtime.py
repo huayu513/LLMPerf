@@ -6,8 +6,10 @@ only accepts immutable image references and well-formed Docker identifiers.
 from __future__ import annotations
 
 import json
+import math
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -255,11 +257,42 @@ class DockerRuntime:
         if code != 0:
             raise RuntimeError("docker rm failed")
 
-    def _stream_run(self, command, log_path):
+    def _stream_run(self, command, log_path, timeout_seconds=None, container_name=None):
         if self._custom_runner:
             process = self.runner(command, shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         else:
             process = subprocess.Popen(list(command), shell=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        expired = threading.Event()
+
+        def terminate():
+            if hasattr(process, "poll") and process.poll() is not None:
+                return
+            expired.set()
+            try:
+                process.kill()
+            except (OSError, AttributeError):
+                pass
+            if container_name:
+                try:
+                    self.runner(["docker", "rm", "-f", container_name], shell=False, timeout=10)
+                except Exception:
+                    pass
+
+        timer = threading.Timer(timeout_seconds, terminate) if timeout_seconds is not None else None
+        if timer is not None:
+            timer.daemon = True
+            timer.start()
+        try:
+            return self._read_stream(process, log_path, expired)
+        finally:
+            if timer is not None:
+                timer.cancel()
+            stream = getattr(process, "stdout", None)
+            if hasattr(stream, "close"):
+                stream.close()
+
+    @staticmethod
+    def _read_stream(process, log_path, expired):
         output = []
         stream = getattr(process, "stdout", None)
         if isinstance(stream, str):
@@ -283,9 +316,11 @@ class DockerRuntime:
         if output and isinstance(stream, str):
             with log_path.open("a", encoding="utf-8") as log:
                 log.write("".join(output))
-        return code
+        return 124 if expired.is_set() else code
 
-    def run(self, spec, log_path):
+    def run(self, spec, log_path, *, timeout_seconds=None):
+        if timeout_seconds is not None and (not math.isfinite(timeout_seconds) or timeout_seconds <= 0):
+            raise ValueError("container timeout must be finite and positive")
         code, _, err = self._inspect_raw(spec.name)
         if code == 0:
             raise RuntimeError(f"container name already exists: {spec.name}")
@@ -304,7 +339,8 @@ class DockerRuntime:
         log_path.write_text("", encoding="utf-8")
         cleanup_target: str = spec.name
         try:
-            exit_code = self._stream_run(command, log_path)
+            exit_code = (self._stream_run(command, log_path) if timeout_seconds is None else
+                         self._stream_run(command, log_path, timeout_seconds, spec.name))
         finally:
             try:
                 data = self.inspect(spec.name)

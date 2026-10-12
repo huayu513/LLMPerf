@@ -16,7 +16,7 @@
 }
 ```
 
-顾问请求会发送配置中的 `Authorization: Bearer <令牌>`、`Content-Type: application/json`、`X-Model-Pool: dsv41`，请求体固定带 `reasoning_effort: "none"`、`chat_template_kwargs: {"thinking": false}`、`max_tokens: 64`、`temperature: 0` 和 `stream: false`。也可用 `"api_key_env": "LLMPERF_ADVISOR_KEY"` 代替 `authorization`，从环境变量生成相同的 Bearer Header。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
+顾问请求会发送配置中的 `Authorization: Bearer <令牌>`、`Content-Type: application/json`、`X-Model-Pool: dsv41`，请求体固定带 `reasoning_effort: "none"`、`chat_template_kwargs: {"thinking": false}`、`temperature: 0` 和 `stream: false`。场景解析与初始推荐默认 `max_tokens: 64`，Adaptive 反馈选点默认 1024；可通过 `advisor.task_max_tokens` 按任务覆盖。也可用 `"api_key_env": "LLMPERF_ADVISOR_KEY"` 代替 `authorization`，从环境变量生成相同的 Bearer Header。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
 
 ```bash
 python3 benchctl.py scenario --config configs/experiment.json \
@@ -26,7 +26,7 @@ python3 benchctl.py tune-plan --config configs/experiment.json
 
 模型只提取最大输入 token、最大输出 token、业务并发和 `latency` / `throughput` 优先级。有缺项时返回一个追问，不修改配置；信息完整时平台校验数值并写入 `scenario`，随后每次 run 保存不可变快照。调优默认按输入与输出各三个长度档位的九种组合构造固定请求集；如需沿用 `input_path` 的原始 JSONL，执行 `tune-plan --use-captured`。生成负载时会尝试用目标镜像中的 checkpoint tokenizer 校准输入档位，失败时保留保守近似，并在结果中标明。输出 `max_tokens` 是请求上限，实际输入/输出 token 由压测服务器的 usage 核验；若实际输入超过给定最大值，该试验不能参与选优。
 
-平台按模型、GPU 和镜像能力建立参数目录；本地大模型只在生成计划时推荐候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。平台将完整、有序的候选集与固定请求集写入不可变的 `plan.json`；此时不启动模型服务进行压测。所有候选在指定业务并发下使用同一请求集；吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有填写明确 SLO 时不会凭空设时延门槛。最佳配置与安全基线都做重复复验，报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
+平台按模型、GPU 和镜像能力建立参数目录。默认 `search.strategy: "strict"`：本地大模型只在生成计划时推荐候选，完整候选和执行顺序写入不可变的 `plan.json`。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。规划不启动模型服务进行压测。所有候选在指定业务并发下使用同一固定负载；探索可使用同一小样本子集，最终复验使用完整请求集。吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有明确 SLO 时不会凭空设时延门槛。报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
 
 Web 页面在场景信息不足时保留前文，可直接输入补充信息继续解析；“重新描述”会清空这段对话。
 
@@ -36,11 +36,43 @@ Web 页面在场景信息不足时保留前文，可直接输入补充信息继�
 python3 benchctl.py run --plan /path/to/result-dir/plan.json
 ```
 
-中断后点击“严格 Resume”，或执行 `python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume`。开始搜索和恢复都只读取已保存的计划；实测阶段不调用顾问模型，也不新增候选。运行前核对模型、固定请求集、GPU、镜像和运行时代码。规划阶段保存 `plan.json`、`plan-lock.json`、`catalog.json` 和 `scenario.json`；开始搜索后才生成 `tune-state.json`、trial 与 `best.json`。运行现有吞吐 `auto` 时仍必须提供 `input_path`，其规划和评分逻辑没有变化。
+中断后点击“严格 Resume”，或执行 `python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume`。Strict 执行不调用顾问，也不依赖原配置文件；Adaptive 可调用顾问，但只使用计划冻结的搜索设置，原配置至多用于读取认证字段。两种模式都不在运行中新增候选。运行前核对模型、固定请求集、GPU、镜像和运行时代码。规划阶段保存 `plan.json`、`plan-lock.json`、`catalog.json` 和 `scenario.json`；开始搜索后才生成 `tune-state.json`、trial 与 `best.json`。运行现有吞吐 `auto` 时仍必须提供 `input_path`，其规划和评分逻辑没有变化。
+
+### Adaptive：实测反馈驱动选点
+
+第一阶段仅接入 `tune-plan → run`，不接管原来的 `auto`。在原 `experiment.json` 的 `search` 中加入或合并：
+
+```json
+"search": {
+  "strategy": "adaptive",
+  "max_trials": 64,
+  "repetitions": 3,
+  "adaptive": {
+    "candidate_pool_limit": 256,
+    "batch_size": 3,
+    "max_advisor_calls": 12,
+    "final_top_k": 2
+  }
+}
+```
+
+命令仍是 `tune-plan --config ...`，审查计划后执行 `run --plan ...`。默认配置和 Strict 行为不变；直接用 Adaptive 配置执行 `auto` 会明确报错，避免悄悄忽略策略。
+
+- 计划冻结候选池、请求集、业务并发、目标、策略版本和预算，不冻结执行顺序。候选池按基础拓扑与参数族分层生成，并去掉可确定的每实例请求上限等价配置；池大小可以大于实际试验预算。仍只调现有三个参数，不开放任意命令或新增启动参数。
+- 先测基线及代表性配置，每批默认三次探索后调用反馈顾问；首次出现新的失败类型可提前结束批次，进行诊断选点。顾问接收环境摘要、吞吐/P95/TTFT/TPOT、实际配置差异、实际长度、脱敏日志尾部和剩余预算，在最多 24 个合法未测候选的 shortlist 中选择下一批。诊断是待验证假设，不改变结果有效性或 backend 封禁规则。
+- 超时、凭据缺失、输出越界或重复、调用配额耗尽时，确定性规则接管选点。`max_advisor_calls: 0` 关闭运行期顾问，便于比较规则自适应；它不关闭规划阶段的初始推荐。每批最多八个候选，`final_top_k` 最多五个。
+- 规划预留 `(final_top_k + 1) × repetitions` 次试验，分别用于近优候选和基线复验，另外至少允许两次探索。相同候选不重复复验。探索根据已观测耗时估算并预留复验时间；顾问等待计入总时间，运行期单次请求最多等待 30 秒或更短的剩余探索时间。原生 Docker trial 到总截止时间会终止并定向清理，容器清理可能产生少量额外耗时。
+- 最终赢家只由完整负载复验决定。只有基线也通过复验，`best.json.comparison.relative_improvement` 才给出相对改善；否则为 `null`。所有失败和中断分配都占试验配额，恢复不会无限免费重试。
+
+Adaptive 的 `plan.json` 不保存令牌。运行期优先使用 `advisor.api_key_env` 指定的环境变量，未指定时尝试 `LLMPERF_ADVISOR_KEY`；兼容配置中的 `authorization`，只读取该字段，不重新加载场景、候选或预算。认证不可用时降级规则，不阻止压测。运行期端点、模型和其他请求设置使用计划中的不可变快照。请避免顾问服务和被测服务共享 GPU；顾问只在试验间隙调用，但共享显存或后台 GPU 活动仍可能干扰结果。
+
+每次决策在启动下一批前写入 `decisions/000001.json` 等文件，保存脱敏输入、测量证据哈希、模型响应、校验结果、最终候选和来源。`tune-state.json` 保存配额与待执行批次。Resume 复用已接受决策；调用中断且没有有效决策时记录规则降级，不重复消耗同一模型调用。试验、决策、原始 JSON/JSONL/复现脚本及最终报告被改动后拒绝恢复。Web 概览显示策略、调用配额、选点假设和降级原因。
+
+这一阶段没有改变合成负载的前缀复用特征，也没有加入在线 GPU/KV 指标采集或贝叶斯优化。业务验证优先使用 `tune-plan --use-captured` 的真实请求回放；比较不同策略时固定候选池、请求集和预算，不能把扩大候选池的收益直接当作模型收益。
 
 ## 首次部署与启动
 
-机器需要可运行 `python3` 的 Python 环境、NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。模型权重、输入 JSONL 和运行镜像放在目标机器上。镜像需要提供可用的 `sglang serve` 命令，并包含 PyTorch、aiohttp、bash、curl、setsid；程序检查本地镜像，不自动拉取或构建镜像。
+机器需要 Python 3.11 或更新版本、NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。模型权重、输入 JSONL 和运行镜像放在目标机器上。镜像需要提供可用的 `sglang serve` 命令，并包含 PyTorch、aiohttp、bash、curl、setsid；程序检查本地镜像，不自动拉取或构建镜像。
 
 修改唯一的配置文件：
 
@@ -232,7 +264,10 @@ python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume
 
 ```bash
 python3 -B -m unittest discover -s tests -v
+python3 -B -m unittest discover -s verification -v
 ```
+
+`verification/` 包含仓库跟踪的自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 回归测试，均不调用真实顾问或启动 GPU 压测。`tests/` 为本地自测目录；macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
 
 复制后的目录可以直接运行 `python3 benchctl.py --help`。实际硬件、checkpoint 和镜像的兼容性由目标机器上的环境探测、探索样本和最终完整输入复跑确认。
 

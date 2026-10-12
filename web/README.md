@@ -1,5 +1,11 @@
 # LLMPerf Web Console
 
+## 自适应反馈调优
+
+在 `experiment.json` 配置 `search.strategy: "adaptive"` 后，仍通过“生成智能调优计划”和“开始搜索”两步运行。计划预览显示候选池和探索/复验配额；运行概览显示顾问调用配额、反馈假设、实际选择和规则降级原因。默认 `strict` 不变，原 `auto` 暂不接入 Adaptive。
+
+`GET /api/runs/{run_id}` 的 `summary.strategy` 标记策略，`adaptive_decisions` 提供紧凑决策列表，不重复传输完整顾问输入。决策原文保存在 `decisions/`，与试验证据一起校验；“严格 Resume”在 Adaptive 中也会复用已接受决策，不代表切回 Strict。认证不可用时降级规则，计划不会保存令牌。
+
 A local, single-server debugging console for \`LLMPerf\`.
 
 Start it with Python 3 from the \`LLMPerf\` directory or repository root:

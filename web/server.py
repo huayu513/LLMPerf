@@ -173,6 +173,7 @@ def summarize_run(run_dir: Path) -> dict[str, Any]:
         "row_count": row_count,
         "best_summary": summarize_best(best_doc if isinstance(best_doc, dict) else None),
         "workflow_mode": plan.get("metadata", {}).get("workflow_mode", "auto") if isinstance(plan, dict) else "auto",
+        "strategy": plan.get("metadata", {}).get("search", {}).get("strategy", "strict") if isinstance(plan, dict) else "strict",
         "served_model_name": (
             resolved.get("served_model_name")
             if isinstance(resolved, dict)
@@ -1732,6 +1733,31 @@ class LLMPerfHandler(BaseHTTPRequestHandler):
         })
 
 
+def adaptive_decisions(run_dir: Path) -> list[dict[str, Any]]:
+    state = json_load(run_dir / "tune-state.json", {})
+    records = state.get("adaptive", {}).get("records", []) if isinstance(state, dict) else []
+    result = []
+    for entry in records[-200:]:
+        path = run_dir / str(entry.get("manifest", ""))
+        if not path.resolve().is_relative_to((run_dir / "decisions").resolve()):
+            continue
+        document = json_load(path, {})
+        if not isinstance(document, dict):
+            continue
+        row = {key: document.get(key) for key in
+               ("id", "source", "status", "reason", "diagnosis", "selected", "validation_rejections")}
+        row["manifest"] = entry.get("manifest")
+        response = document.get("response")
+        recommendations = response.get("next_candidates", []) if isinstance(response, dict) else []
+        if not isinstance(recommendations, list):
+            recommendations = []
+        row["recommendations"] = [item for item in recommendations
+                                  if isinstance(item, dict) and item.get("candidate_id") in (row["selected"] or [])]
+        row["status"] = row["status"] or "PENDING"
+        result.append(row)
+    return result
+
+
 def run_detail(run_dir: Path) -> dict[str, Any]:
     if not run_dir.is_dir():
         raise KeyError("run not found")
@@ -1741,6 +1767,7 @@ def run_detail(run_dir: Path) -> dict[str, Any]:
         "plan": json_load(run_dir / "plan.json", None),
         "search_state": json_load(run_dir / "search-state.json", None),
         "tune_state": json_load(run_dir / "tune-state.json", None),
+        "adaptive_decisions": adaptive_decisions(run_dir),
         "scenario": json_load(run_dir / "scenario.json", None),
         "catalog": json_load(run_dir / "catalog.json", None),
         "results_index": json_load(run_dir / "results-index.json", None),
