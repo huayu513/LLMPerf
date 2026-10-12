@@ -15,7 +15,7 @@
   "advisor": {
     "base_url": "http://10.64.39.63:54321/v1/chat/completions",
     "model": "DeepSeek-V4-Flash-Local",
-    "api_key_env": "API_KEY",
+    "authorization": "Bearer <你的实际令牌>",
     "timeout_seconds": 1000,
     "thinking": true,
     "task_max_tokens": {
