@@ -18,6 +18,8 @@ class AdaptiveWebTests(unittest.TestCase):
                 {"id": 2, "manifest": "../experiment.json"}]}}))
             (root / "decisions/000001.json").write_text(json.dumps({"id": 1, "source": "rule",
                 "status": "FALLBACK", "reason": "runtime_advisor_unavailable", "selected": ["c0"],
+                "response": {"next_candidates": [None, {"candidate_id": "c0", "reason": "accepted"},
+                                                   {"candidate_id": "outside", "reason": "rejected"}]},
                 "input": {"environment": "not part of the compact UI response"}}))
             summary = summarize_run(root)
             rows = adaptive_decisions(root)
@@ -25,6 +27,7 @@ class AdaptiveWebTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["reason"], "runtime_advisor_unavailable")
             self.assertNotIn("input", rows[0])
+            self.assertEqual(rows[0]["recommendations"], [{"candidate_id": "c0", "reason": "accepted"}])
 
 
 if __name__ == "__main__":

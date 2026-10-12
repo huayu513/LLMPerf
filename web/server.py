@@ -1748,7 +1748,11 @@ def adaptive_decisions(run_dir: Path) -> list[dict[str, Any]]:
                ("id", "source", "status", "reason", "diagnosis", "selected", "validation_rejections")}
         row["manifest"] = entry.get("manifest")
         response = document.get("response")
-        row["recommendations"] = response.get("next_candidates", []) if isinstance(response, dict) else []
+        recommendations = response.get("next_candidates", []) if isinstance(response, dict) else []
+        if not isinstance(recommendations, list):
+            recommendations = []
+        row["recommendations"] = [item for item in recommendations
+                                  if isinstance(item, dict) and item.get("candidate_id") in (row["selected"] or [])]
         row["status"] = row["status"] or "PENDING"
         result.append(row)
     return result

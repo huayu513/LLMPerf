@@ -85,7 +85,8 @@ def _family(candidate):
     static = candidate["static_config"]
     return tuple(static.get(key) for key in
                  ("tp", "dp", "pp", "dp_attention", "backend", "dspark")) + (
-        static.get("deployment", {}).get("instance_count", 1),)
+        static.get("deployment", {}).get("instance_count", 1),
+        tuple(static.get("gpu_indexes", candidate.get("gpu_indexes", []))))
 
 
 class AdaptiveScheduler:

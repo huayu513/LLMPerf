@@ -31,6 +31,7 @@ def candidate_summary(candidate: dict) -> dict:
     static = candidate["static_config"]
     deployment = static.get("deployment", {})
     return {"candidate_id": candidate["id"], "config_hash": candidate["config_hash"],
+            "gpu_indexes": static.get("gpu_indexes", candidate.get("gpu_indexes", [])),
             "params": {key: static.get(key) for key in
                        ("tp", "dp", "pp", "dp_attention", "backend", "dspark",
                         "mem_fraction_static", "chunked_prefill_size", "max_running_requests")},
