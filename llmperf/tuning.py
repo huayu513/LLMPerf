@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import ReplayAdapter, read_attempt
-from .advisor import LocalAdvisor
+from .advisor import LocalAdvisor, runtime_advisor_spec
+from .adaptive import build_candidate_pool
+from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
@@ -267,9 +269,11 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
     source_hash = sha256_file(config_path)
     if config.scenario is None or config.advisor is None:
         raise ConfigError("intelligent planning requires scenario and advisor in experiment.json")
-    reserve = 2 * config.search.repetitions
-    capacity = config.search.max_trials - reserve
-    if capacity < 2:
+    adaptive = config.search.strategy == "adaptive"
+    reserve = ((config.search.adaptive.final_top_k + 1) if adaptive else 2) * config.search.repetitions
+    exploration_capacity = config.search.max_trials - reserve
+    capacity = config.search.adaptive.candidate_pool_limit if adaptive else exploration_capacity
+    if exploration_capacity < 2:
         raise ConfigError("search.max_trials must allow two explorations plus winner and baseline repeats")
     root, template, catalog = _prepare_new_run(config_path, use_captured=use_captured,
                                                 probe=probe, calibrate=calibrate)
@@ -293,7 +297,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
     try:
         reply = (advisor or LocalAdvisor(config.advisor)).ask("candidates", {
             "scenario": scene, "catalog": _visible_catalog(catalog, 0),
-            "tested": [], "remaining_trials": capacity - 1,
+            "tested": [], "remaining_trials": exploration_capacity - 1,
             "request_count": template.metadata["expected_request_count"],
         })
         rows = reply.get("candidates")
@@ -311,29 +315,43 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
     except (ConfigError, ValueError) as exc:
         advisor_calls.append({"task": "candidates", "status": "FALLBACK", "reason": str(exc)})
 
-    # The rule catalog is materialized now, so execution cannot invent candidates.
-    for row in catalog["base_candidates"]:
-        add(CandidateConfig(**{**row, "gpu_indexes": tuple(row["gpu_indexes"]),
-                               "reasons": tuple(row.get("reasons", ())) }))
-    knob_items = list(catalog["knobs"].items())
-    for width in range(1, len(knob_items) + 1):
-        for subset in itertools.combinations(knob_items, width):
-            for values in itertools.product(*(options for _, options in subset)):
-                if len(selected) >= capacity:
-                    break
-                params = dict(zip((name for name, _ in subset), values))
-                for base in catalog["base_candidates"]:
+    if adaptive:
+        bases = [CandidateConfig(**{**row, "gpu_indexes": tuple(row["gpu_indexes"]),
+                                    "reasons": tuple(row.get("reasons", ()))})
+                 for row in catalog["base_candidates"]]
+        pool = build_candidate_pool(bases, catalog["knobs"], scene["target_concurrency"],
+                                    capacity, seeds=selected.values())
+        selected = {candidate.id: candidate for candidate in pool}
+        template.metadata["adaptive_policy"] = {"version": 1, **asdict(config.search.adaptive)}
+        template.metadata["runtime_advisor"] = runtime_advisor_spec(config.advisor, config_path)
+        secrets = (config.advisor.get("authorization", "").removeprefix("Bearer "),)
+        selected = {ident: replace(candidate, reasons=tuple(redact(candidate.reasons, secrets)))
+                    for ident, candidate in selected.items()}
+        advisor_calls = redact(advisor_calls, secrets)
+        decisions = redact(decisions, secrets)
+    else:
+        for row in catalog["base_candidates"]:
+            add(CandidateConfig(**{**row, "gpu_indexes": tuple(row["gpu_indexes"]),
+                                   "reasons": tuple(row.get("reasons", ())) }))
+        knob_items = list(catalog["knobs"].items())
+        for width in range(1, len(knob_items) + 1):
+            for subset in itertools.combinations(knob_items, width):
+                for values in itertools.product(*(options for _, options in subset)):
                     if len(selected) >= capacity:
                         break
-                    if all(base["static_config"].get(key) == value
-                           for key, value in params.items()):
-                        continue
-                    add(_from_suggestion({"base_id": base["id"], "params": params,
-                                          "reason": "rule catalog"}, catalog))
+                    params = dict(zip((name for name, _ in subset), values))
+                    for base in catalog["base_candidates"]:
+                        if len(selected) >= capacity:
+                            break
+                        if all(base["static_config"].get(key) == value
+                               for key, value in params.items()):
+                            continue
+                        add(_from_suggestion({"base_id": base["id"], "params": params,
+                                              "reason": "rule catalog"}, catalog))
+                if len(selected) >= capacity:
+                    break
             if len(selected) >= capacity:
                 break
-        if len(selected) >= capacity:
-            break
 
     source = Path(template.metadata["jsonl_host"])
     effective_search = replace(config.search, concurrency_max=scene["target_concurrency"],
@@ -349,7 +367,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
         "candidate_source": "advisor_with_validated_rule_catalog",
         "baseline_candidate_id": baseline["id"],
         "planning": {"advisor_calls": advisor_calls, "decisions": decisions,
-                     "exploration_capacity": capacity, "planned_candidates": len(selected),
+                     "exploration_capacity": exploration_capacity, "planned_candidates": len(selected),
                      "reserved_final_trials": reserve},
         "candidates": {candidate.id: asdict(candidate) for candidate in selected.values()},
     })
