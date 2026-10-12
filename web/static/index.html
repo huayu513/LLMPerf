@@ -27,7 +27,7 @@
       </label>
       <div class="button-row">
         <button id="refresh-runs">刷新结果</button>
-        <button id="plan-run">生成 Auto 计划</button>
+        <button id="plan-run" title="规则搜索，不调用大模型">生成 Auto 计划</button>
       </div>
       <label class="scenario-input">
         智能调优场景（自然语言）
@@ -36,10 +36,11 @@
       <div class="button-row scenario-actions">
         <button id="parse-scenario">解析并写入场景</button>
         <button id="reset-scenario">重新描述</button>
-        <button id="tune-run">生成智能调优计划</button>
+        <button id="tune-run" title="使用大模型规划，并在搜索过程中分析实测结果">生成智能调优计划</button>
       </div>
       <p id="scenario-response" class="hint">先解析场景；信息不足时会显示大模型的追问。生成计划只做环境检查和候选规划，选中计划后点击下方“开始搜索”才会实测。</p>
-      <p class="hint">默认结果目录是 /data/hjh/LLMPerf/results。Strict 冻结执行顺序；配置 search.strategy 为 adaptive 后，冻结候选池并由实测反馈调整顺序。生成计划不会直接跑压测。</p>
+      <p class="hint">生成 Auto 计划：规则搜索，不调用大模型。生成智能调优计划：自动使用 Adaptive，大模型参与规划和实测反馈，无需配置 strategy；顾问不可用时降级规则选点。生成计划不会直接跑压测，旧计划按已保存策略执行。</p>
+      <p class="hint">默认结果目录是 /data/hjh/LLMPerf/results。选中计划后点击“开始搜索”；智能调优先测基线，再根据每批实测结果调用大模型，在“反馈决策”中查看分析与下一批建议。</p>
     </section>
 
     <section class="layout">
@@ -57,7 +58,7 @@
             <h2>运行概览</h2>
             <div class="button-row compact">
               <button id="run-plan" disabled>开始搜索</button>
-              <button id="resume-run" disabled>严格 Resume</button>
+              <button id="resume-run" title="按已保存计划和策略恢复，不切换搜索模式" disabled>严格 Resume</button>
               <button id="adopt-runtime" disabled>接受当前代码 Resume</button>
               <button id="collect-run" disabled>Collect</button>
             </div>
