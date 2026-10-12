@@ -6,3 +6,4 @@ debug-trials/
 *.log
 .DS_Store
 tests/
+verification/
