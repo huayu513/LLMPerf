@@ -150,6 +150,16 @@ main {
   align-self: end;
 }
 
+.workload-selector {
+  display: grid;
+  gap: 6px;
+  flex-basis: 100%;
+}
+
+.workload-selector select {
+  width: 100%;
+}
+
 .button-row {
   display: flex;
   gap: 8px;
