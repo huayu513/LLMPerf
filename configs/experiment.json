@@ -20,8 +20,9 @@
     "base_url": "http://10.64.39.63:54321/v1/chat/completions",
     "model": "DeepSeek-V4-Flash-Local",
     "authorization": "Bearer <你的实际令牌>",
-    "timeout_seconds": 1000,
+    "timeout_seconds": 2000,
     "thinking": true,
+    "reasoning_effort": "max",
     "task_max_tokens": {
       "scene": 100000,
       "candidates": 100000,

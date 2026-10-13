@@ -20,7 +20,7 @@ from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
-from .configuration import RunConfig, load_config
+from .configuration import ADVISOR_TIMEOUT_SECONDS, RunConfig, load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .errors import ConfigError
@@ -599,7 +599,7 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
             if time_available <= 0:
                 state["decisions"].append({"reason": "time_reserved_for_final_verification"})
                 break
-            pending = scheduler.next_batch(available, min(300, time_available), time_available)
+            pending = scheduler.next_batch(available, min(ADVISOR_TIMEOUT_SECONDS, time_available), time_available)
             if not pending:
                 state["decisions"].append({"reason": "candidate_pool_exhausted"})
                 break

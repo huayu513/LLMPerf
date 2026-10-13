@@ -89,6 +89,9 @@ class LocalAdvisor:
         body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.settings.get("model_pool"):
+        elif self.settings.get("reasoning_effort"):
+            request_body["reasoning_effort"] = self.settings["reasoning_effort"]
+            request_body["chat_template_kwargs"]["reasoning_effort"] = self.settings["reasoning_effort"]
             headers["X-Model-Pool"] = self.settings["model_pool"]
         authorization = self.settings.get("authorization")
         if authorization:
@@ -136,7 +139,7 @@ def extract_and_save_scenario(config_path: str | Path, description: str,
 
 def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:
     return {key: settings[key] for key in
-            ("base_url", "model", "model_pool", "timeout_seconds", "thinking", "task_max_tokens")
+            ("base_url", "model", "model_pool", "timeout_seconds", "thinking", "reasoning_effort", "task_max_tokens")
             if key in settings} | {
         "api_key_env": settings.get("api_key_env") or "LLMPERF_ADVISOR_KEY",
         "credential_file": str(config_path) if settings.get("authorization") else None,
@@ -146,7 +149,7 @@ def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:
 
 def load_runtime_advisor(spec: dict, timeout_seconds: float) -> LocalAdvisor:
     settings = {key: spec[key] for key in
-                ("base_url", "model", "model_pool", "thinking", "task_max_tokens") if key in spec}
+                ("base_url", "model", "model_pool", "thinking", "reasoning_effort", "task_max_tokens") if key in spec}
     settings["timeout_seconds"] = min(float(spec["timeout_seconds"]), timeout_seconds)
     env_name = spec.get("api_key_env", "LLMPERF_ADVISOR_KEY")
     if os.environ.get(env_name):

@@ -68,6 +68,7 @@ _SEARCH_KEYS = {
 }
 _DOCKER_KEYS = {"name_prefix", "network_mode", "service_port", "shm_size", "ipc"}
 _LINUX_EPHEMERAL_PORT_RANGE = (32768, 60999)
+ADVISOR_TIMEOUT_SECONDS = 2000
 
 
 def _reject_constant(value: str) -> None:
@@ -276,7 +277,7 @@ def validate_scenario(value: Any) -> dict[str, Any]:
 
 def validate_advisor(value: Any) -> dict[str, Any]:
     data = _object(value, "advisor")
-    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds", "thinking", "task_max_tokens"}, "advisor")
+    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds", "thinking", "reasoning_effort", "task_max_tokens"}, "advisor")
     url = _string(data.get("base_url"), "advisor.base_url").rstrip("/")
     try:
         parts = urlsplit(url)
@@ -295,13 +296,18 @@ def validate_advisor(value: Any) -> dict[str, Any]:
         "model_pool": _string(data.get("model_pool", ""), "advisor.model_pool", nonempty=False),
         "authorization": _string(data.get("authorization", ""), "advisor.authorization", nonempty=False),
         "api_key_env": _string(data.get("api_key_env", ""), "advisor.api_key_env", nonempty=False),
-        "timeout_seconds": _number(data.get("timeout_seconds", 60), "advisor.timeout_seconds", 0, strict=True),
-        "thinking": _boolean(data.get("thinking", False), "advisor.thinking"),
+        "timeout_seconds": _number(data.get("timeout_seconds", ADVISOR_TIMEOUT_SECONDS), "advisor.timeout_seconds", 0, strict=True),
+        "thinking": thinking,
+        "reasoning_effort": effort,
         "task_max_tokens": {key: _integer(value, f"advisor.task_max_tokens.{key}", 1)
                             for key, value in budgets.items()},
     }
 
 
+    thinking = _boolean(data.get("thinking", False), "advisor.thinking")
+    effort = _string(data.get("reasoning_effort", "max" if thinking else "none"), "advisor.reasoning_effort")
+    if effort not in {"none", "high", "max"} or thinking == (effort == "none"):
+        raise ConfigError("advisor.reasoning_effort must be high/max with thinking enabled, or none with thinking disabled")
 def load_config(path: Path, *, tuning: bool = False,
                 default_strategy: str = "strict", strategy: str | None = None) -> RunConfig:
     """Load and validate one JSON run configuration."""
