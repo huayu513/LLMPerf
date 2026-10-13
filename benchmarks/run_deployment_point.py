@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=0)
     parser.add_argument("--ready-timeout", type=int, default=3600)
-    parser.add_argument("--request-timeout", type=float, default=3600.0)
+    parser.add_argument("--request-timeout", type=float, default=6666.0)
     parser.add_argument("--base-url", default="")
     parser.add_argument("--jsonl", default=os.environ.get("S1_JSONL_PATH", "/run/workload/input.jsonl"))
     parser.add_argument("--index", default=os.environ.get("S1_INDEX_PATH", "/run/workload/replay_index.json"))

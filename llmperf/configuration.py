@@ -47,7 +47,7 @@ class RunConfig:
     search: SearchConfig = field(default_factory=SearchConfig)
     smoke: bool = False
     warmup: int = 0
-    request_timeout: float = 3600.0
+    request_timeout: float = 6666.0
     ready_timeout: int = 3600
     model_overrides: dict[str, Any] = field(default_factory=dict)
     docker: DockerConfig = field(default_factory=DockerConfig)
@@ -358,7 +358,7 @@ def load_config(path: Path, *, tuning: bool = False,
                        strategy_override=strategy),
         warmup=_integer(data.get("warmup", 0), f"{source_path}: warmup", 0),
         request_timeout=_number(
-            data.get("request_timeout", 3600.0), f"{source_path}: request_timeout",
+            data.get("request_timeout", 6666.0), f"{source_path}: request_timeout",
             0.0, strict=True,
         ),
         ready_timeout=_integer(

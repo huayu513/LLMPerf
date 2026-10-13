@@ -489,7 +489,7 @@ class ReplayAdapter:
             "--arrival-rate-scale", str(task.scale or 1.0),
             "--run", str(attempt),
             "--warmup", str(self._value("warmup", default=0)),
-            "--request-timeout", str(self._value("request_timeout", default=3600)),
+            "--request-timeout", str(self._value("request_timeout", default=6666)),
             "--ready-timeout", str(self._value("ready_timeout", default=3600)),
             "--jsonl", "/run/workload/input.jsonl",
             "--index", "/run/workload/replay_index.json",

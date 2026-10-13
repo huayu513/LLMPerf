@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
         help="Exact captured requests to send before measurement.",
     )
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--request-timeout", type=float, default=3600.0)
+    parser.add_argument("--request-timeout", type=float, default=6666.0)
     parser.add_argument("--progress-every", type=int, default=50)
     parser.add_argument("--flush-every", type=int, default=10)
     parser.add_argument(
