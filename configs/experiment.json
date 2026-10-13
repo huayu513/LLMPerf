@@ -10,7 +10,10 @@
     "concurrency_max": 64,
     "max_trials": 666,
     "max_seconds": 864000,
-    "explore_request_limit": 512
+    "explore_request_limit": 512,
+    "adaptive": {
+      "max_advisor_calls": 66
+    }
   },
   "advisor": {
     "base_url": "http://10.64.39.63:54321/v1/chat/completions",
