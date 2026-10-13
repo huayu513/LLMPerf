@@ -265,14 +265,27 @@ def validate_scenario(value: Any) -> dict[str, Any]:
     allowed = {"max_input_tokens", "max_output_tokens", "target_concurrency", "priority"}
     _unknown(data, allowed, "scenario")
     result = {
-        "max_input_tokens": _integer(data.get("max_input_tokens"), "scenario.max_input_tokens", 1),
-        "max_output_tokens": _integer(data.get("max_output_tokens"), "scenario.max_output_tokens", 1),
+        "max_input_tokens": (_integer(data["max_input_tokens"], "scenario.max_input_tokens", 1)
+                             if data.get("max_input_tokens") is not None else None),
+        "max_output_tokens": (_integer(data["max_output_tokens"], "scenario.max_output_tokens", 1)
+                              if data.get("max_output_tokens") is not None else None),
         "target_concurrency": _integer(data.get("target_concurrency"), "scenario.target_concurrency", 1),
         "priority": _string(data.get("priority"), "scenario.priority"),
     }
     if result["priority"] not in {"latency", "throughput"}:
         raise ConfigError("scenario.priority must be latency or throughput")
     return result
+
+
+def resolve_scenario(value: Any, search: SearchConfig,
+                     gpu_indexes: tuple[int, ...] | None = None) -> dict[str, Any]:
+    data = dict(_object(value, "scenario"))
+    if data.get("target_concurrency") is None:
+        data["target_concurrency"] = search.start_concurrency or min(
+            search.concurrency_max, max(8, 8 * len(gpu_indexes or (0,))))
+    if data.get("priority") is None:
+        data["priority"] = "throughput"
+    return validate_scenario(data)
 
 
 def validate_advisor(value: Any) -> dict[str, Any]:
@@ -290,6 +303,10 @@ def validate_advisor(value: Any) -> dict[str, Any]:
         raise ConfigError("advisor.base_url must be an HTTP(S) endpoint without credentials or query")
     budgets = _object(data.get("task_max_tokens", {}), "advisor.task_max_tokens")
     _unknown(budgets, {"scene", "candidates", "explain", "next_experiments"}, "advisor.task_max_tokens")
+    thinking = _boolean(data.get("thinking", False), "advisor.thinking")
+    effort = _string(data.get("reasoning_effort", "max" if thinking else "none"), "advisor.reasoning_effort")
+    if effort not in {"none", "high", "max"} or thinking == (effort == "none"):
+        raise ConfigError("advisor.reasoning_effort must be high/max with thinking enabled, or none with thinking disabled")
     return {
         "base_url": url,
         "model": _string(data.get("model"), "advisor.model"),
@@ -304,10 +321,6 @@ def validate_advisor(value: Any) -> dict[str, Any]:
     }
 
 
-    thinking = _boolean(data.get("thinking", False), "advisor.thinking")
-    effort = _string(data.get("reasoning_effort", "max" if thinking else "none"), "advisor.reasoning_effort")
-    if effort not in {"none", "high", "max"} or thinking == (effort == "none"):
-        raise ConfigError("advisor.reasoning_effort must be high/max with thinking enabled, or none with thinking disabled")
 def load_config(path: Path, *, tuning: bool = False,
                 default_strategy: str = "strict", strategy: str | None = None) -> RunConfig:
     """Load and validate one JSON run configuration."""
@@ -350,7 +363,9 @@ def load_config(path: Path, *, tuning: bool = False,
             raise ConfigError(f"{source_path}: gpu_indexes must be unique")
 
     overrides = _object(data.get("model_overrides", {}), f"{source_path}: model_overrides")
-    scenario = validate_scenario(data["scenario"]) if "scenario" in data else None
+    search = _search(data.get("search", {}), f"{source_path}: search",
+                     default_strategy=default_strategy, strategy_override=strategy)
+    scenario = resolve_scenario(data["scenario"], search, gpu_indexes) if "scenario" in data else None
     advisor = validate_advisor(data["advisor"]) if "advisor" in data else None
     return RunConfig(
         model_path=model_path,
@@ -359,9 +374,7 @@ def load_config(path: Path, *, tuning: bool = False,
         output_dir=output_dir,
         gpu_indexes=gpu_indexes,
         smoke=_boolean(data.get("smoke", False), f"{source_path}: smoke"),
-        search=_search(data.get("search", {}), f"{source_path}: search",
-                       default_strategy=default_strategy,
-                       strategy_override=strategy),
+        search=search,
         warmup=_integer(data.get("warmup", 0), f"{source_path}: warmup", 0),
         request_timeout=_number(
             data.get("request_timeout", 6666.0), f"{source_path}: request_timeout",

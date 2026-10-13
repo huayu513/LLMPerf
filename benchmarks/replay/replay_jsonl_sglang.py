@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Canonical full-request Chat Completions replay client for SGLang.
 
-The JSON object stored under each JSONL row's ``request`` key is sent without
-field additions, removals, or overrides.  The runner supports both closed-loop
-fixed concurrency and open-loop replay based on captured timestamps.
+By default each JSONL row's ``request`` object is sent unchanged. An explicitly
+requested output-token ceiling caps generation limits without editing the source
+JSONL. Both closed-loop and timestamp-based open-loop replay are supported.
 """
 
 from __future__ import annotations
@@ -75,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--request-timeout", type=float, default=6666.0)
+    parser.add_argument("--output-token-limit", type=int)
     parser.add_argument("--progress-every", type=int, default=50)
     parser.add_argument("--flush-every", type=int, default=10)
     parser.add_argument(
@@ -83,7 +84,10 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Verify JSONL size and SHA-256 against the index before replay.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_token_limit is not None and args.output_token_limit < 1:
+        parser.error("--output-token-limit must be a positive integer")
+    return args
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -289,6 +293,26 @@ def observe_response_item(
             state["last_activity"] = now
 
 
+def apply_output_token_limit(request: dict[str, Any], limit: int | None) -> dict[str, Any]:
+    if limit is None:
+        return request
+    if type(limit) is not int or limit < 1:
+        raise ValueError("output token limit must be a positive integer")
+    effective = dict(request)
+    bounded = False
+    for key in ("max_tokens", "max_completion_tokens"):
+        original = request.get(key)
+        if original is not None:
+            if type(original) is not int or original < 1:
+                raise ValueError(f"request.{key} must be a positive integer")
+            effective[key] = min(original, limit)
+            bounded = True
+    if not bounded:
+        key = "max_completion_tokens" if "max_completion_tokens" in request else "max_tokens"
+        effective[key] = limit
+    return effective
+
+
 async def request_one(
     session: aiohttp.ClientSession,
     fd: int,
@@ -301,8 +325,10 @@ async def request_one(
     worker_id: int | None,
     endpoint_id: str,
     endpoint_url: str,
+    output_token_limit: int | None = None,
 ) -> dict[str, Any]:
-    payload = read_request(fd, record)
+    original_payload = read_request(fd, record)
+    payload = apply_output_token_limit(original_payload, output_token_limit)
     started = time.perf_counter()
     started_unix = time.time()
     state: dict[str, Any] = {
@@ -375,7 +401,12 @@ async def request_one(
         "endpoint_url": endpoint_url,
         "request_model": payload.get("model"),
         "request_max_tokens": payload.get("max_tokens"),
+        "request_max_completion_tokens": payload.get("max_completion_tokens"),
+        "original_max_tokens": original_payload.get("max_tokens"),
+        "original_max_completion_tokens": original_payload.get("max_completion_tokens"),
+        "output_token_limit": output_token_limit,
         "request_sha256": record.get("request_sha256"),
+        "effective_request_sha256": hashlib.sha256(canonical_request_bytes(payload)).hexdigest(),
         "scheduled_time_unix": started_unix - (started - scheduled_at),
         "dispatch_lag_seconds": max(started - scheduled_at, 0.0),
         "start_time_unix": started_unix,
@@ -616,6 +647,7 @@ async def run_replay(
                 worker_id=worker_id,
                 endpoint_id=endpoint["id"],
                 endpoint_url=endpoint["base_url"],
+                output_token_limit=getattr(args, "output_token_limit", None),
             )
         finally:
             in_flight[endpoint_index] -= 1

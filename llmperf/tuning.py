@@ -20,7 +20,7 @@ from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
-from .configuration import ADVISOR_TIMEOUT_SECONDS, RunConfig, load_config
+from .configuration import ADVISOR_TIMEOUT_SECONDS, RunConfig, load_config, resolve_scenario
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .errors import ConfigError
@@ -139,10 +139,10 @@ def _result_length_evidence(result: dict, scenario: dict) -> None:
     if usage_missing or not prompts:
         result["status"] = "INCONCLUSIVE"
         result.setdefault("reasons", []).append("scene_request_usage_missing")
-    if prompts and max(prompts) > scenario["max_input_tokens"]:
+    if prompts and scenario.get("max_input_tokens") is not None and max(prompts) > scenario["max_input_tokens"]:
         result["status"] = "INCONCLUSIVE"
         result.setdefault("reasons", []).append("scene_max_input_exceeded")
-    if completions and max(completions) > scenario["max_output_tokens"]:
+    if completions and scenario.get("max_output_tokens") is not None and max(completions) > scenario["max_output_tokens"]:
         result["status"] = "INCONCLUSIVE"
         result.setdefault("reasons", []).append("scene_max_output_exceeded")
 
@@ -185,13 +185,13 @@ def _calibrate_scene(root: Path, config, model, scene: dict) -> dict:
 
 def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool, probe,
                      calibrate: bool) -> tuple[Path, Plan, dict]:
-    if config.scenario is None:
-        raise ConfigError("scenario is missing; describe the scene before tune")
     if config.advisor is None:
         raise ConfigError("advisor settings are required for tune")
     if use_captured and config.input_path is None:
-        raise ConfigError("--use-captured requires input_path")
+        raise ConfigError("captured tuning requires input_path; configure the original JSONL or explicitly use --use-synthetic")
     scene = config.scenario
+    if not use_captured and (scene["max_input_tokens"] is None or scene["max_output_tokens"] is None):
+        raise ConfigError("synthetic tuning requires explicit max_input_tokens and max_output_tokens")
     base = config.output_dir or config.source_path.parent / "results"
     ident = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     root = Path(base) / ident
@@ -238,6 +238,7 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
     plan.metadata.update({
         "workflow_mode": "tune", "scenario": scene, "workload_source": "captured" if use_captured else "synthetic",
         "scene_calibration": calibration,
+        "output_token_limit": scene["max_output_tokens"] if use_captured else None,
         "config_path": str(config_path),
         "configuration": {"model_path": str(config.model_path), "image": config.image,
                           "gpu_indexes": config.gpu_indexes, "scenario": scene},
@@ -259,16 +260,18 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
 
 
 
-def plan_tuning(config_path: str | Path, *, use_captured: bool = False,
+def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
                 probe=probe_environment, advisor: LocalAdvisor | None = None,
                 calibrate: bool = True, strategy: str | None = None) -> dict:
     """Freeze a scene workload and all search candidates without benchmarking."""
     config_path = Path(config_path).expanduser().resolve()
     config = load_config(config_path, tuning=True, default_strategy="adaptive",
                          strategy=strategy)
+    config = replace(config, scenario=resolve_scenario(config.scenario or {}, config.search,
+                                                     config.gpu_indexes))
     source_hash = sha256_file(config_path)
-    if config.scenario is None or config.advisor is None:
-        raise ConfigError("intelligent planning requires scenario and advisor in experiment.json")
+    if config.advisor is None:
+        raise ConfigError("intelligent planning requires advisor in experiment.json")
     adaptive = config.search.strategy == "adaptive"
     reserve = ((config.search.adaptive.final_top_k + 1) if adaptive else 2) * config.search.repetitions
     exploration_capacity = config.search.max_trials - reserve

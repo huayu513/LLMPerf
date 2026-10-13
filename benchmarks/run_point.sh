@@ -30,6 +30,7 @@ Options:
   --warmup N
   --ready-timeout SECONDS
   --request-timeout SECONDS
+  --output-token-limit N
   --base-url URL
   --jsonl PATH
   --index PATH
@@ -69,6 +70,7 @@ limit=""
 warmup=0
 ready_timeout=3600
 request_timeout=6666
+output_token_limit=""
 base_url="${S1_BASE_URL:-http://127.0.0.1:25080}"
 jsonl_path="${S1_JSONL_PATH:-${BENCHMARK_DIR}/input.jsonl}"
 index_path="${S1_INDEX_PATH:-${BENCHMARK_DIR}/replay_index.json}"
@@ -129,6 +131,11 @@ while [[ "$#" -gt 0 ]]; do
       request_timeout="$2"
       shift 2
       ;;
+    --output-token-limit)
+      [[ "$#" -ge 2 ]] || die "--output-token-limit requires a value"
+      output_token_limit="$2"
+      shift 2
+      ;;
     --base-url)
       [[ "$#" -ge 2 ]] || die "--base-url requires a value"
       base_url="$2"
@@ -185,6 +192,7 @@ replay_args=(
   --index "$index_path"
 )
 [[ -n "$limit" ]] && replay_args+=(--limit "$limit")
+[[ -n "$output_token_limit" ]] && replay_args+=(--output-token-limit "$output_token_limit")
 [[ "$verify_source" == "0" ]] && replay_args+=(--no-verify-source)
 
 output_dir="$(bash "$REPLAY" "${replay_args[@]}" --print-output-dir)"

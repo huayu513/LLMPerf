@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE, deployment_service_ports
+from .errors import ConfigError
 from .types import DockerConfig, PlanTask
 
 
@@ -512,6 +513,11 @@ class ReplayAdapter:
         limit = _task_request_limit(task, self.metadata)
         if limit is not None:
             command_values.extend(("--limit", str(max(0, int(limit)))))
+        output_token_limit = self.metadata.get("output_token_limit")
+        if output_token_limit is not None:
+            if type(output_token_limit) is not int or output_token_limit < 1:
+                raise ConfigError("output_token_limit must be a positive integer")
+            command_values.extend(("--output-token-limit", str(output_token_limit)))
         command = tuple(command_values)
         if task.run_class == "concurrency_rejected":
             command = ("bash", "-c", "exit 2")
