@@ -47,7 +47,12 @@ def main(argv=None):
     tune.add_argument('--config', required=True)
     tune.add_argument('--strategy', choices=('strict', 'adaptive'),
                       help='override search.strategy; scene tuning defaults to adaptive')
-    tune.add_argument('--use-captured', action='store_true', help='use input_path JSONL instead of a generated scene workload')
+    workload = tune.add_mutually_exclusive_group()
+    workload.add_argument('--use-captured', dest='use_captured', action='store_true',
+                          help='replay input_path requests without rewriting them (default)')
+    workload.add_argument('--use-synthetic', dest='use_captured', action='store_false',
+                          help='explicitly generate a scene workload; requires input/output maxima')
+    tune.set_defaults(use_captured=True)
     args = parser.parse_args(argv)
     try:
         if args.command == 'run':

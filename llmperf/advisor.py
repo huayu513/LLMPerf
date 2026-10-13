@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import sha256_file, write_json_atomic
-from .configuration import load_config, validate_scenario
+from .configuration import load_config, resolve_scenario
 from .errors import ConfigError
 
 
@@ -38,11 +38,14 @@ class LocalAdvisor:
         instructions = {
             "scene": (
                 "Extract only facts explicitly supplied by the Chinese user. Return JSON only. "
-                "If any of max_input_tokens, max_output_tokens, target_concurrency, priority "
-                "is missing or ambiguous, return {\"question\":\"one concise Chinese clarification\"}. "
-                "Otherwise return {\"scenario\":{\"max_input_tokens\":integer,"
-                "\"max_output_tokens\":integer,\"target_concurrency\":integer,"
-                "\"priority\":\"latency or throughput\"}}. K means 1024. "
+                "Return {\"scenario\":{...}} with any explicitly supplied subset of "
+                "max_input_tokens, max_output_tokens, target_concurrency, priority. "
+                "Token limits and concurrency are positive integers; priority is latency or throughput. "
+                "Omit missing fields or use null. 默认/其他默认 means omitted, not guessed values. "
+                "For 并发48，时延优先，其他默认 return only target_concurrency=48 and priority=latency. "
+                "Never ask for omitted/default fields; the controller applies deterministic defaults. "
+                "Only if an explicitly supplied requirement is ambiguous, return "
+                "{\"question\":\"one concise Chinese clarification\"}. K means 1024. "
                 "Do not invent numeric limits or a latency SLO."
             ),
             "candidates": (
@@ -86,6 +89,9 @@ class LocalAdvisor:
         }
         if not thinking:
             request_body["reasoning_effort"] = "none"
+        elif self.settings.get("reasoning_effort"):
+            request_body["reasoning_effort"] = self.settings["reasoning_effort"]
+            request_body["chat_template_kwargs"]["reasoning_effort"] = self.settings["reasoning_effort"]
         body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.settings.get("model_pool"):
@@ -125,18 +131,24 @@ def extract_and_save_scenario(config_path: str | Path, description: str,
         if not isinstance(question, str) or not question.strip():
             raise ConfigError("advisor clarification question is invalid")
         return {"status": "NEEDS_INPUT", "question": question.strip()}
-    scene = validate_scenario(reply.get("scenario"))
+    supplied = reply.get("scenario")
+    scene = resolve_scenario(supplied, config.search, config.gpu_indexes)
     if sha256_file(path) != before:
         raise ConfigError("experiment.json changed while parsing the scene; retry")
     document = json.loads(path.read_text(encoding="utf-8"))
     document["scenario"] = scene
     write_json_atomic(path, document)
-    return {"status": "PASS", "scenario": scene, "config_path": str(path)}
+    sources = {key: "user" if supplied.get(key) is not None else (
+        "captured_request" if key in {"max_input_tokens", "max_output_tokens"} else
+        "configuration" if key == "target_concurrency" and config.search.start_concurrency is not None
+        else "default") for key in scene}
+    return {"status": "PASS", "scenario": scene, "sources": sources,
+            "request_timeout": config.request_timeout, "config_path": str(path)}
 
 
 def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:
     return {key: settings[key] for key in
-            ("base_url", "model", "model_pool", "timeout_seconds", "thinking", "task_max_tokens")
+            ("base_url", "model", "model_pool", "timeout_seconds", "thinking", "reasoning_effort", "task_max_tokens")
             if key in settings} | {
         "api_key_env": settings.get("api_key_env") or "LLMPERF_ADVISOR_KEY",
         "credential_file": str(config_path) if settings.get("authorization") else None,
@@ -146,7 +158,7 @@ def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:
 
 def load_runtime_advisor(spec: dict, timeout_seconds: float) -> LocalAdvisor:
     settings = {key: spec[key] for key in
-                ("base_url", "model", "model_pool", "thinking", "task_max_tokens") if key in spec}
+                ("base_url", "model", "model_pool", "thinking", "reasoning_effort", "task_max_tokens") if key in spec}
     settings["timeout_seconds"] = min(float(spec["timeout_seconds"]), timeout_seconds)
     env_name = spec.get("api_key_env", "LLMPERF_ADVISOR_KEY")
     if os.environ.get(env_name):

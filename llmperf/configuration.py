@@ -47,7 +47,7 @@ class RunConfig:
     search: SearchConfig = field(default_factory=SearchConfig)
     smoke: bool = False
     warmup: int = 0
-    request_timeout: float = 3600.0
+    request_timeout: float = 6666.0
     ready_timeout: int = 3600
     model_overrides: dict[str, Any] = field(default_factory=dict)
     docker: DockerConfig = field(default_factory=DockerConfig)
@@ -68,6 +68,7 @@ _SEARCH_KEYS = {
 }
 _DOCKER_KEYS = {"name_prefix", "network_mode", "service_port", "shm_size", "ipc"}
 _LINUX_EPHEMERAL_PORT_RANGE = (32768, 60999)
+ADVISOR_TIMEOUT_SECONDS = 2000
 
 
 def _reject_constant(value: str) -> None:
@@ -264,8 +265,10 @@ def validate_scenario(value: Any) -> dict[str, Any]:
     allowed = {"max_input_tokens", "max_output_tokens", "target_concurrency", "priority"}
     _unknown(data, allowed, "scenario")
     result = {
-        "max_input_tokens": _integer(data.get("max_input_tokens"), "scenario.max_input_tokens", 1),
-        "max_output_tokens": _integer(data.get("max_output_tokens"), "scenario.max_output_tokens", 1),
+        "max_input_tokens": (_integer(data["max_input_tokens"], "scenario.max_input_tokens", 1)
+                             if data.get("max_input_tokens") is not None else None),
+        "max_output_tokens": (_integer(data["max_output_tokens"], "scenario.max_output_tokens", 1)
+                              if data.get("max_output_tokens") is not None else None),
         "target_concurrency": _integer(data.get("target_concurrency"), "scenario.target_concurrency", 1),
         "priority": _string(data.get("priority"), "scenario.priority"),
     }
@@ -274,9 +277,20 @@ def validate_scenario(value: Any) -> dict[str, Any]:
     return result
 
 
+def resolve_scenario(value: Any, search: SearchConfig,
+                     gpu_indexes: tuple[int, ...] | None = None) -> dict[str, Any]:
+    data = dict(_object(value, "scenario"))
+    if data.get("target_concurrency") is None:
+        data["target_concurrency"] = search.start_concurrency or min(
+            search.concurrency_max, max(8, 8 * len(gpu_indexes or (0,))))
+    if data.get("priority") is None:
+        data["priority"] = "throughput"
+    return validate_scenario(data)
+
+
 def validate_advisor(value: Any) -> dict[str, Any]:
     data = _object(value, "advisor")
-    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds", "thinking", "task_max_tokens"}, "advisor")
+    _unknown(data, {"base_url", "model", "model_pool", "authorization", "api_key_env", "timeout_seconds", "thinking", "reasoning_effort", "task_max_tokens"}, "advisor")
     url = _string(data.get("base_url"), "advisor.base_url").rstrip("/")
     try:
         parts = urlsplit(url)
@@ -289,14 +303,19 @@ def validate_advisor(value: Any) -> dict[str, Any]:
         raise ConfigError("advisor.base_url must be an HTTP(S) endpoint without credentials or query")
     budgets = _object(data.get("task_max_tokens", {}), "advisor.task_max_tokens")
     _unknown(budgets, {"scene", "candidates", "explain", "next_experiments"}, "advisor.task_max_tokens")
+    thinking = _boolean(data.get("thinking", False), "advisor.thinking")
+    effort = _string(data.get("reasoning_effort", "max" if thinking else "none"), "advisor.reasoning_effort")
+    if effort not in {"none", "high", "max"} or thinking == (effort == "none"):
+        raise ConfigError("advisor.reasoning_effort must be high/max with thinking enabled, or none with thinking disabled")
     return {
         "base_url": url,
         "model": _string(data.get("model"), "advisor.model"),
         "model_pool": _string(data.get("model_pool", ""), "advisor.model_pool", nonempty=False),
         "authorization": _string(data.get("authorization", ""), "advisor.authorization", nonempty=False),
         "api_key_env": _string(data.get("api_key_env", ""), "advisor.api_key_env", nonempty=False),
-        "timeout_seconds": _number(data.get("timeout_seconds", 60), "advisor.timeout_seconds", 0, strict=True),
-        "thinking": _boolean(data.get("thinking", False), "advisor.thinking"),
+        "timeout_seconds": _number(data.get("timeout_seconds", ADVISOR_TIMEOUT_SECONDS), "advisor.timeout_seconds", 0, strict=True),
+        "thinking": thinking,
+        "reasoning_effort": effort,
         "task_max_tokens": {key: _integer(value, f"advisor.task_max_tokens.{key}", 1)
                             for key, value in budgets.items()},
     }
@@ -344,7 +363,9 @@ def load_config(path: Path, *, tuning: bool = False,
             raise ConfigError(f"{source_path}: gpu_indexes must be unique")
 
     overrides = _object(data.get("model_overrides", {}), f"{source_path}: model_overrides")
-    scenario = validate_scenario(data["scenario"]) if "scenario" in data else None
+    search = _search(data.get("search", {}), f"{source_path}: search",
+                     default_strategy=default_strategy, strategy_override=strategy)
+    scenario = resolve_scenario(data["scenario"], search, gpu_indexes) if "scenario" in data else None
     advisor = validate_advisor(data["advisor"]) if "advisor" in data else None
     return RunConfig(
         model_path=model_path,
@@ -353,12 +374,10 @@ def load_config(path: Path, *, tuning: bool = False,
         output_dir=output_dir,
         gpu_indexes=gpu_indexes,
         smoke=_boolean(data.get("smoke", False), f"{source_path}: smoke"),
-        search=_search(data.get("search", {}), f"{source_path}: search",
-                       default_strategy=default_strategy,
-                       strategy_override=strategy),
+        search=search,
         warmup=_integer(data.get("warmup", 0), f"{source_path}: warmup", 0),
         request_timeout=_number(
-            data.get("request_timeout", 3600.0), f"{source_path}: request_timeout",
+            data.get("request_timeout", 6666.0), f"{source_path}: request_timeout",
             0.0, strict=True,
         ),
         ready_timeout=_integer(

@@ -59,7 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--warmup", type=int, default=0)
     parser.add_argument("--ready-timeout", type=int, default=3600)
-    parser.add_argument("--request-timeout", type=float, default=3600.0)
+    parser.add_argument("--request-timeout", type=float, default=6666.0)
+    parser.add_argument("--output-token-limit", type=int)
     parser.add_argument("--base-url", default="")
     parser.add_argument("--jsonl", default=os.environ.get("S1_JSONL_PATH", "/run/workload/input.jsonl"))
     parser.add_argument("--index", default=os.environ.get("S1_INDEX_PATH", "/run/workload/replay_index.json"))
@@ -67,7 +68,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-gpu-monitor", action="store_true")
     parser.add_argument("--no-verify-source", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output_token_limit is not None and args.output_token_limit < 1:
+        parser.error("--output-token-limit must be a positive integer")
+    return args
 
 
 def die(message: str) -> None:
@@ -429,6 +433,8 @@ def main() -> int:
                 "--request-timeout", str(args.request_timeout),
             ]
             command.append("--no-verify-source" if args.no_verify_source else "--verify-source")
+            if args.output_token_limit is not None:
+                command.extend(("--output-token-limit", str(args.output_token_limit)))
             (results_root / "replay.command.sh").write_text(
                 "#!/usr/bin/env bash\nexec " + " ".join(shlex_quote(part) for part in command) + "\n",
                 encoding="utf-8",

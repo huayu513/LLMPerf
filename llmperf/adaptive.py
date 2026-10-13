@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .adapters import _effective_max_running_requests
 from .advisor import LocalAdvisor, load_runtime_advisor
+from .configuration import ADVISOR_TIMEOUT_SECONDS
 from .artifacts import sha256_file, write_json_atomic
 from .errors import ConfigError
 from .evidence import candidate_summary, environment_summary, redact, summarize_trial
@@ -107,7 +108,7 @@ class AdaptiveScheduler:
         self.advisor_error = None
         if advisor is None and self.policy["max_advisor_calls"]:
             try:
-                self.advisor = load_runtime_advisor(metadata["runtime_advisor"], 300)
+                self.advisor = load_runtime_advisor(metadata["runtime_advisor"], ADVISOR_TIMEOUT_SECONDS)
             except (ConfigError, KeyError, TypeError, ValueError):
                 self.advisor_error = "runtime_advisor_unavailable"
         settings = getattr(self.advisor, "settings", {})

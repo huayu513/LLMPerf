@@ -924,10 +924,9 @@ def run_auto_job(config_path: Path) -> dict[str, Any]:
     return JOBS.create_subprocess("auto", benchctl_argv("auto", "--config", str(config_path)), LLMPERF_ROOT)
 
 
-def run_tune_job(config_path: Path, use_captured: bool = False) -> dict[str, Any]:
+def run_tune_job(config_path: Path, use_captured: bool = True) -> dict[str, Any]:
     argv = benchctl_argv("tune-plan", "--config", str(config_path), "--strategy", "adaptive")
-    if use_captured:
-        argv.append("--use-captured")
+    argv.append("--use-captured" if use_captured else "--use-synthetic")
     return JOBS.create_subprocess("tune-plan", argv, LLMPERF_ROOT)
 
 
@@ -1664,7 +1663,10 @@ class LLMPerfHandler(BaseHTTPRequestHandler):
             return self.send_json(run_auto_job(config_path), HTTPStatus.ACCEPTED)
         if parts == ["jobs", "tune-plan"]:
             config_path = Path(os.path.expandvars(str(body.get("config_path") or DEFAULT_CONFIG_PATH))).expanduser().resolve()
-            return self.send_json(run_tune_job(config_path, body.get("use_captured") is True), HTTPStatus.ACCEPTED)
+            use_captured = body.get("use_captured", True)
+            if type(use_captured) is not bool:
+                raise ValueError("use_captured must be a boolean")
+            return self.send_json(run_tune_job(config_path, use_captured), HTTPStatus.ACCEPTED)
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "stop":
             return self.send_json(JOBS.stop(parts[1]), HTTPStatus.ACCEPTED)
         if len(parts) >= 2 and parts[0] == "runs":

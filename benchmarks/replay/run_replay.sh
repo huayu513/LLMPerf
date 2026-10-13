@@ -29,6 +29,7 @@ Core options:
   --run N
   --limit N
   --warmup N
+  --output-token-limit N
   --output-dir PATH
   --dry-run
   --print-output-dir
@@ -63,7 +64,8 @@ max_in_flight=0
 run_index=1
 limit=""
 warmup=0
-request_timeout=3600
+request_timeout=6666
+output_token_limit=""
 progress_every=50
 flush_every=10
 verify_source=1
@@ -126,6 +128,11 @@ while [[ "$#" -gt 0 ]]; do
     --request-timeout)
       [[ "$#" -ge 2 ]] || die "--request-timeout requires a value"
       request_timeout="$2"
+      shift 2
+      ;;
+    --output-token-limit)
+      [[ "$#" -ge 2 ]] || die "--output-token-limit requires a value"
+      output_token_limit="$2"
       shift 2
       ;;
     --progress-every)
@@ -201,6 +208,9 @@ if [[ -z "$limit" ]]; then
   [[ "$run_class" == "smoke" ]] && limit=8 || limit=0
 fi
 require_nonnegative_int limit "$limit"
+if [[ -n "$output_token_limit" ]]; then
+  [[ "$output_token_limit" =~ ^[1-9][0-9]*$ ]] || die "--output-token-limit must be a positive integer"
+fi
 if [[ "$mode" == "closed-loop" && "$concurrency" == "0" ]]; then
   die "closed-loop concurrency must be positive"
 fi
@@ -261,6 +271,7 @@ COMMAND=(
 )
 [[ -n "$base_urls" ]] && COMMAND+=(--base-urls "$base_urls")
 [[ -n "$endpoint_ids" ]] && COMMAND+=(--endpoint-ids "$endpoint_ids")
+[[ -n "$output_token_limit" ]] && COMMAND+=(--output-token-limit "$output_token_limit")
 [[ "$verify_source" == "1" ]] && COMMAND+=(--verify-source) ||
   COMMAND+=(--no-verify-source)
 

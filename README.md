@@ -4,7 +4,7 @@
 
 ## 场景驱动智能调优（新模式）
 
-原来的 `auto` 保持原样。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算；`input_path` 在新模式下可以省略。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
+原来的 `auto` 保持原样。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算，默认回放 `input_path` 的原始 JSONL；只有显式选择合成负载时才可以省略 `input_path`。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
 
 Web 按入口选择模式，不需要业务人员配置 `strategy`：
 
@@ -20,8 +20,9 @@ Web 按入口选择模式，不需要业务人员配置 `strategy`：
   "base_url": "http://10.64.39.63:54321/v1/chat/completions",
   "model": "DeepSeek-V4-Flash-Local",
   "api_key_env": "API_KEY",
-  "timeout_seconds": 1000,
+  "timeout_seconds": 2000,
   "thinking": true,
+  "reasoning_effort": "max",
   "task_max_tokens": {
     "scene": 100000,
     "candidates": 100000,
@@ -33,15 +34,19 @@ Web 按入口选择模式，不需要业务人员配置 `strategy`：
 
 启动 CLI 或 Web 服务前执行 `export API_KEY='接口令牌'`，环境变量只放令牌，不带 `Bearer ` 前缀。顾问请求会发送 `Authorization: Bearer <令牌>` 和 `Content-Type: application/json`；只有配置了非空 `model_pool` 才发送 `X-Model-Pool`。也兼容配置中的 `authorization`，该字段优先于环境变量。
 
-请求体带 `temperature: 0` 和 `stream: false`。`advisor.thinking: true` 发送 `chat_template_kwargs: {"thinking": true}`，并省略关闭思考的 `reasoning_effort: "none"`；不配置 `thinking` 时保持原来的关闭行为。上述配置把所有顾问任务的 `max_tokens` 上限设为 100000；未覆盖时，场景解析、初始推荐和解释默认 64，Adaptive 反馈选点默认 1024。上限不保证实际生成长度，服务端限制仍然生效。场景解析与规划调用使用 `advisor.timeout_seconds`，上述配置为 1000 秒；Adaptive 运行期单次调用最多 300 秒，同时受更短的配置超时和剩余探索时间限制。修改这些设置后需要重新生成计划，旧计划恢复不会自动切换。业务人员不需要填写场景 JSON：在 Web 控制台的“智能调优场景”输入自然语言并点“解析并写入场景”，或执行：
+请求体带 `temperature: 0` 和 `stream: false`。上述配置开启顾问思考，并在顶层及 `chat_template_kwargs` 中发送 `reasoning_effort: "max"`；镜像或接口需支持该取值，是否实际生效以服务端为准。未配置 `thinking` 时仍关闭思考。上述配置将所有顾问任务的输出上限设为 100000，未覆盖时场景解析、初始推荐和解释默认 64，Adaptive 反馈选点默认 1024。这些是顾问参数，不会改写被测业务请求的思考与输出设置。场景解析、规划和反馈默认等待 2000 秒；反馈同时受更短的配置超时及剩余探索预算限制。业务请求总超时默认 `request_timeout: 6666` 秒，服务启动等待 `ready_timeout` 不变。旧计划保留冻结设置，修改后需重新生成计划。业务人员可以在 Web 输入自然语言并点“解析并写入场景”，或执行：
 
 ```bash
 python3 benchctl.py scenario --config configs/experiment.json \
-  --describe "输入最多 8K token，输出最多 2K token，业务并发约 32，时延优先"
+  --describe "并发48，时延优先，其他默认"
 python3 benchctl.py tune-plan --config configs/experiment.json
 ```
 
-模型只提取最大输入 token、最大输出 token、业务并发和 `latency` / `throughput` 优先级。有缺项时返回一个追问，不修改配置；信息完整时平台校验数值并写入 `scenario`，随后每次 run 保存不可变快照。调优默认按输入与输出各三个长度档位的九种组合构造固定请求集；如需沿用 `input_path` 的原始 JSONL，执行 `tune-plan --use-captured`。生成负载时会尝试用目标镜像中的 checkpoint tokenizer 校准输入档位，失败时保留保守近似，并在结果中标明。输出 `max_tokens` 是请求上限，实际输入/输出 token 由压测服务器的 usage 核验；若实际输入超过给定最大值，该试验不能参与选优。
+模型只提取明确指定的字段；省略或“其他默认”的字段由平台确定，不追问缺项，只追问明确要求中的歧义。默认输入保留原始 `messages`，不截断、不填充；默认输出保留原请求的 `max_tokens` / `max_completion_tokens`，原请求没有上限就不新增，沿用服务端默认值和上下文限制。场景快照中 `max_input_tokens` / `max_output_tokens: null` 表示不添加场景上限。默认目标为 `throughput`；默认并发优先使用 `search.start_concurrency`，否则按配置 GPU 数每卡 8 并发估算（未指定 GPU 时按一张卡保守估算），且不超过 `search.concurrency_max`。缺少 `input_path` 会报错，不静默切换合成负载。
+
+明确指定输出上限时，仅在发送请求时收紧原有生成限制；原上限更小时保留原值，没有上限时增加 `max_tokens`。源 JSONL 不修改，结果记录原始和实际发送请求的哈希及输出限制。明确指定输入上限只核验实际 usage，不自动截断或补齐。实际输入/输出超过指定上限或 usage 缺失的试验不能参与选优。
+
+如确需合成负载，明确指定输入、输出两个长度上限，再执行 `tune-plan --use-synthetic`；旧的 `--use-captured` 仍可使用，但已是默认行为。合成负载仍采用输入与输出三个档位的九种组合，并尝试用目标镜像中的 tokenizer 校准，失败时保留近似并标明。原始回放不进行合成或校准。
 
 平台按模型、GPU 和镜像能力建立参数目录。智能调优默认使用 `adaptive`：候选池写入不可变的 `plan.json`，本地大模型在生成计划时推荐候选，并在搜索过程中分析实测结果、选择下一批候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。规划不启动模型服务进行压测。所有候选在指定业务并发下使用同一固定负载；探索可使用同一小样本子集，最终复验使用完整请求集。吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有明确 SLO 时不会凭空设时延门槛。报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
 
@@ -84,7 +89,7 @@ Adaptive 的 `plan.json` 不保存令牌。运行期优先使用 `advisor.api_ke
 
 每次决策在启动下一批前写入 `decisions/000001.json` 等文件，保存脱敏输入、测量证据哈希、模型响应、校验结果、最终候选和来源。`tune-state.json` 保存配额与待执行批次。Resume 复用已接受决策；调用中断且没有有效决策时记录规则降级，不重复消耗同一模型调用。试验、决策、原始 JSON/JSONL/复现脚本及最终报告被改动后拒绝恢复。Web 概览显示策略、调用配额、选点假设和降级原因。
 
-这一阶段没有改变合成负载的前缀复用特征，也没有加入在线 GPU/KV 指标采集或贝叶斯优化。业务验证优先使用 `tune-plan --use-captured` 的真实请求回放；比较不同策略时固定候选池、请求集和预算，不能把扩大候选池的收益直接当作模型收益。
+这一阶段没有加入在线 GPU/KV 指标采集或贝叶斯优化。业务验证默认使用真实请求回放；比较不同策略时固定候选池、请求集和预算，不能把扩大候选池的收益直接当作模型收益。
 
 ## 首次部署与启动
 

@@ -295,6 +295,15 @@ function renderSummary() {
   var adaptiveState = (detail.tune_state || {}).adaptive || {};
   var policy = planMeta.adaptive_policy || {};
   var isTune = summary.workflow_mode === "tune" || planMeta.workflow_mode === "tune";
+  var workloadSource = planMeta.workload_source || "captured";
+  var scene = planMeta.scenario || {};
+  var runtimeAdvisor = planMeta.runtime_advisor || {};
+  var inputPolicy = workloadSource === "synthetic" ? "合成长度档位"
+    : "保留原始 messages，不截断、不填充" + (scene.max_input_tokens != null
+      ? "；usage 核验上限 " + scene.max_input_tokens : "");
+  var outputPolicy = workloadSource === "synthetic" ? "合成请求使用指定 max_tokens 上限"
+    : planMeta.output_token_limit != null ? "上限 " + planMeta.output_token_limit + "；原请求限制更小时保留原值"
+    : "保留原请求限制；未设置时不新增，使用服务端默认";
   var advisorParticipation = !isTune ? "不调用；使用规则搜索"
     : strategy === "adaptive" ? (policy.max_advisor_calls === 0
       ? "仅规划推荐；运行期顾问配额为 0"
@@ -314,6 +323,14 @@ function renderSummary() {
     ["路径", summary.path],
     ["候选数", summary.candidate_count],
     ["固定请求数", planMeta.expected_request_count],
+    ["负载来源", workloadSource === "synthetic" ? "显式合成负载" : "原始 JSONL 回放"],
+    ["输入策略", inputPolicy],
+    ["输出策略", outputPolicy],
+    ["单条业务总超时", planMeta.request_timeout != null ? planMeta.request_timeout + " 秒" : "计划未记录"],
+    ["反馈顾问等待", runtimeAdvisor.timeout_seconds != null
+      ? Math.min(runtimeAdvisor.timeout_seconds, 2000) + " 秒（另受剩余探索预算限制）" : "无运行期顾问配置"],
+    ["反馈顾问思考", runtimeAdvisor.thinking === true ? runtimeAdvisor.reasoning_effort || "服务端默认"
+      : runtimeAdvisor.thinking === false ? "关闭" : "计划未记录"],
     ["计划探索上限", planning.exploration_capacity],
     ["复验预留次数", planning.reserved_final_trials],
     ["顾问规划结果", planning.advisor_calls],
@@ -638,7 +655,7 @@ async function planRun() {
 async function parseScenario() {
   state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
   var description = el("scenario-description").value.trim();
-  if (!description) throw new Error("请先描述输入/输出最大 token、业务并发和优先目标");
+  if (!description) throw new Error("请描述明确要求，例如：并发48，时延优先，其他默认；也可以输入全部默认");
   if (state.sceneConfigPath !== state.configPath) state.sceneDraft = "";
   var combined = state.sceneDraft ? state.sceneDraft + "\n补充信息：" + description : description;
   el("scenario-response").textContent = "正在调用本地大模型解析场景…";
@@ -656,20 +673,36 @@ async function parseScenario() {
   }
   el("scenario-response").textContent = result.status === "NEEDS_INPUT"
     ? "请补充：" + result.question
-    : "已写入 experiment.json：" + JSON.stringify(result.scenario);
+    : formatScenarioResult(result);
+}
+
+function formatScenarioResult(result) {
+  var scene = result.scenario || {};
+  var sources = result.sources || {};
+  var labels = { user: "用户指定", configuration: "配置值", default: "平台默认", captured_request: "原始请求" };
+  function source(key) { return "（" + (labels[sources[key]] || "已生效") + "）"; }
+  return "已写入 experiment.json：输入 " + (scene.max_input_tokens == null
+    ? "保留原始 messages" : "上限 " + scene.max_input_tokens + "，只核验不截断") + source("max_input_tokens")
+    + "；输出 " + (scene.max_output_tokens == null ? "保留原限制，未设置则沿用服务默认"
+      : "上限 " + scene.max_output_tokens + "，不放大原限制") + source("max_output_tokens")
+    + "；并发 " + scene.target_concurrency + source("target_concurrency")
+    + "；" + (scene.priority === "latency" ? "时延优先" : "吞吐优先") + source("priority")
+    + (result.request_timeout != null ? "；单条业务总超时 " + result.request_timeout + " 秒" : "");
 }
 
 function resetScenario() {
   state.sceneDraft = "";
   state.sceneConfigPath = "";
   el("scenario-description").value = "";
-  el("scenario-description").placeholder = "例如：输入最多 8K token，输出最多 2K token，业务并发约 32，时延优先。";
+  el("scenario-description").placeholder = "例如：并发48，时延优先，其他默认。也可以明确指定输入/输出 token 上限。";
   el("scenario-response").textContent = "请重新描述场景。";
 }
 
 async function tuneRun() {
   state.configPath = el("config-path").value.trim() || state.settings.default_config_path;
-  await createJob("/api/jobs/tune-plan", { config_path: state.configPath });
+  await createJob("/api/jobs/tune-plan", {
+    config_path: state.configPath, use_captured: el("tune-workload-source").value !== "synthetic"
+  });
 }
 
 async function startSavedPlan(resume) {
