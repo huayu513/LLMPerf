@@ -54,12 +54,14 @@ class RunConfig:
     scenario: dict[str, Any] | None = None
     advisor: dict[str, Any] | None = None
     source_path: Path = Path()
+    engine: str = "sglang"
+    engine_options: dict[str, Any] = field(default_factory=dict)
 
 
 _TOP_KEYS = {
     "model_path", "input_path", "image", "output_dir", "gpu_indexes",
     "search", "smoke", "warmup", "request_timeout", "ready_timeout",
-    "model_overrides", "docker", "scenario", "advisor",
+    "model_overrides", "docker", "scenario", "advisor", "engine", "engine_options",
 }
 _SEARCH_KEYS = {
     "concurrency_max", "start_concurrency", "explore_request_limit",
@@ -321,6 +323,43 @@ def validate_advisor(value: Any) -> dict[str, Any]:
     }
 
 
+def _engine_options(value: Any, engine: str) -> dict[str, Any]:
+    data = _object(value, "engine_options")
+    if engine == "sglang":
+        _unknown(data, set(), "engine_options for sglang")
+        return {}
+    allowed = {
+        "max_model_len", "gpu_memory_utilization", "max_num_seqs",
+        "max_num_batched_tokens", "enforce_eager", "enable_expert_parallel",
+        "all2all_backend", "moe_backend", "speculative_config",
+    }
+    _unknown(data, allowed, "engine_options")
+    result = {}
+    for key, value in data.items():
+        label = f"engine_options.{key}"
+        if key in {"max_model_len", "max_num_seqs", "max_num_batched_tokens"}:
+            result[key] = _integer(value, label, 1)
+        elif key == "gpu_memory_utilization":
+            result[key] = _number(value, label, 0.0, strict=True)
+            if result[key] >= 1:
+                raise ConfigError(f"{label} must be < 1")
+        elif key in {"enforce_eager", "enable_expert_parallel"}:
+            result[key] = _boolean(value, label)
+        elif key == "speculative_config":
+            spec = _object(value, label)
+            _unknown(spec, {"method", "num_speculative_tokens"}, label)
+            if set(spec) != {"method", "num_speculative_tokens"}:
+                raise ConfigError(f"{label} requires method and num_speculative_tokens")
+            result[key] = {
+                "method": _string(spec["method"], f"{label}.method"),
+                "num_speculative_tokens": _integer(
+                    spec["num_speculative_tokens"], f"{label}.num_speculative_tokens", 1),
+            }
+        else:
+            result[key] = _string(value, label)
+    return result
+
+
 def load_config(path: Path, *, tuning: bool = False,
                 default_strategy: str = "strict", strategy: str | None = None) -> RunConfig:
     """Load and validate one JSON run configuration."""
@@ -367,6 +406,9 @@ def load_config(path: Path, *, tuning: bool = False,
                      default_strategy=default_strategy, strategy_override=strategy)
     scenario = resolve_scenario(data["scenario"], search, gpu_indexes) if "scenario" in data else None
     advisor = validate_advisor(data["advisor"]) if "advisor" in data else None
+    engine = _string(data.get("engine", "sglang"), "engine")
+    if engine not in {"sglang", "vllm"}:
+        raise ConfigError("engine must be sglang or vllm")
     return RunConfig(
         model_path=model_path,
         input_path=input_path,
@@ -388,4 +430,6 @@ def load_config(path: Path, *, tuning: bool = False,
         scenario=scenario,
         advisor=advisor,
         source_path=source_path,
+        engine=engine,
+        engine_options=_engine_options(data.get("engine_options", {}), engine),
     )

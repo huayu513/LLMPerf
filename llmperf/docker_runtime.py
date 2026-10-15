@@ -37,6 +37,7 @@ class DockerTaskSpec:
     network_mode: str = "bridge"
     shm_size: str = "16g"
     ipc: str = "host"
+    entrypoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,10 @@ class DockerRuntime:
         if spec.host_port is not None and (not isinstance(spec.host_port, int) or isinstance(spec.host_port, bool) or not 1 <= spec.host_port <= 65535):
             raise ValueError("invalid port")
         argv = ["docker", "run", "--rm", "--name", spec.name]
+        if spec.entrypoint is not None:
+            if not isinstance(spec.entrypoint, str) or "\x00" in spec.entrypoint:
+                raise ValueError("invalid Docker entrypoint")
+            argv += ["--entrypoint", spec.entrypoint]
         if spec.gpu_indexes:
             # Docker parses this option as CSV even with shell=False. Keep a
             # multi-device list inside one CSV field.

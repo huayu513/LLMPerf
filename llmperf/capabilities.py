@@ -195,7 +195,17 @@ _HELP_BEGIN = "S1SLOW_SGLANG_HELP_BEGIN\n"
 _HELP_END = "S1SLOW_SGLANG_HELP_END"
 
 
-def _parse_container_probe(text: str) -> tuple[dict[str, Any], str | None]:
+def _container_probe(engine: str) -> str:
+    if engine == "sglang":
+        return _CONTAINER_PROBE
+    if engine != "vllm":
+        raise ValueError(f"unsupported engine: {engine}")
+    return (_CONTAINER_PROBE.replace("sglang", "vllm")
+            .replace("SGLANG", "VLLM")
+            .replace('["vllm","serve","--help"]', '["vllm","serve","--help=all"]'))
+
+
+def _parse_container_probe(text: str, engine: str = "sglang") -> tuple[dict[str, Any], str | None]:
     facts: dict[str, Any] = {}
     for line in text.splitlines():
         if line.startswith(_PROBE_PREFIX):
@@ -206,11 +216,13 @@ def _parse_container_probe(text: str) -> tuple[dict[str, Any], str | None]:
             if isinstance(value, dict):
                 facts = value
             break
-    start = text.find(_HELP_BEGIN)
+    help_begin = f"S1SLOW_{engine.upper()}_HELP_BEGIN\n"
+    help_end = f"S1SLOW_{engine.upper()}_HELP_END"
+    start = text.find(help_begin)
     if start < 0:
         return facts, None
-    start += len(_HELP_BEGIN)
-    end = text.find(_HELP_END, start)
+    start += len(help_begin)
+    end = text.find(help_end, start)
     return facts, text[start:end] if end >= 0 else None
 
 
@@ -238,7 +250,16 @@ def _parse_sglang_capabilities(help_text: str) -> dict[str, list[str]]:
     }
 
 
+def _parse_vllm_capabilities(help_text: str) -> dict[str, list[str]]:
+    capabilities = _parse_sglang_capabilities(help_text)
+    capabilities["runner_backends"] = _choice_values(help_text, "--moe-backend")
+    capabilities["a2a_backends"] = _choice_values(help_text, "--all2all-backend")
+    return capabilities
+
+
 def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) -> EnvironmentSnapshot:
+    engine = getattr(config, "engine", "sglang")
+    probe_script = _container_probe(engine)
     commands: list[Tuple[str, ...]] = []
     reasons: list[str] = []
     checks: list[Mapping[str, Any]] = []
@@ -308,17 +329,21 @@ def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) ->
             else '"device=' + ",".join(str(index) for index in selected) + '"'
         )
         probe_args=["docker", "run", "--rm", "--gpus", gpu_request, "--ipc="+ipc,
-                    "--shm-size", shm, "--network", network, config.image,
-                    "python3", "-c", _CONTAINER_PROBE]
+                    "--shm-size", shm, "--network", network]
+        if engine == "vllm":
+            probe_args += ["--entrypoint", "python3", config.image, "-c", probe_script]
+        else:
+            probe_args += [config.image, "python3", "-c", probe_script]
         probe = call(probe_args, timeout=180)
-        probe_facts, help_text = _parse_container_probe(probe.stdout)
-        required = ("python", "torch", "cuda", "nccl", "sglang")
+        probe_facts, help_text = _parse_container_probe(probe.stdout, engine)
+        required = ("python", "torch", "cuda", "nccl", engine)
         versions_ok = all(probe_facts.get(key) for key in required)
         cuda_ok = (probe_facts.get("cuda_available") is True
                    and isinstance(probe_facts.get("cuda_device_count"), int)
                    and probe_facts["cuda_device_count"] > 0)
         allocation_ok = selected is None or probe_facts.get("cuda_device_count") == len(selected)
-        capabilities = _parse_sglang_capabilities(help_text) if help_text is not None else {
+        parse_capabilities = _parse_vllm_capabilities if engine == "vllm" else _parse_sglang_capabilities
+        capabilities = parse_capabilities(help_text) if help_text is not None else {
             "options": [], "runner_backends": [], "a2a_backends": [],
             "tool_parsers": [], "reasoning_parsers": [],
         }
@@ -345,11 +370,11 @@ def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) ->
         if not versions_ok:
             reasons.append("container required package version unavailable")
         if help_text is None:
-            reasons.append("SGLang serve capabilities unavailable")
+            reasons.append(f"{'vLLM' if engine == 'vllm' else 'SGLang'} serve capabilities unavailable")
         if probe_facts.get("probe_errors"):
             reasons.append("container capability probe reported errors")
         if probe.returncode and not any(
-            reason.startswith(("container ", "SGLang ")) for reason in reasons
+            reason.startswith(("container ", "SGLang ", "vLLM ")) for reason in reasons
         ):
             reasons.append("container capability probe failed")
 

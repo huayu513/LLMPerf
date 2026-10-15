@@ -21,6 +21,7 @@ from .types import DockerConfig, PathConfig
 
 def _probe_config(config, root):
     return SimpleNamespace(image=config.image, docker=config.docker, gpu_indexes=config.gpu_indexes,
+        engine=getattr(config, 'engine', 'sglang'),
         paths=PathConfig(config.model_path, config.input_path, root))
 
 
@@ -147,6 +148,7 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
         raise ConfigError('replay index does not match the saved plan')
     settings = metadata['configuration']
     config = SimpleNamespace(image=metadata['image'], model_path=Path(metadata['model_host']),
+        engine=settings.get('engine', 'sglang'),
         input_path=source, gpu_indexes=settings.get('gpu_indexes'), docker=DockerConfig(**settings['docker']))
     current = probe(_probe_config(config, root))
     if current.status == 'FAIL':
