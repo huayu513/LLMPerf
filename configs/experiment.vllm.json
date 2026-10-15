@@ -1,9 +1,9 @@
 {
   "engine": "vllm",
-  "model_path": "/var/lib/docker/models/DeepSeek-V4-Flash-0731",
-  "input_path": "/data/workloads/input.jsonl",
-  "image": "lazymio/vllm-backport@sha256:<替换为本地SM80镜像的64位摘要>",
-  "output_dir": "/data/LLMPerf/results",
+  "model_path": "/data_sdb/model/DeepSeek-V4-Flash-0731",
+  "input_path": "/data_sdc/hjh19509/s1slow/input_data_0831.jsonl",
+  "image": "mirrors.sangfor.com/lazymio/vllm-backport@sha256:2627d2a97e7f539b99ac98f511c589f5f520d3fc5630b195aca7f6ef865ead4e",
+  "output_dir": "/data_sdc/hjh19509/s1slow/LLMPerf/results",
   "gpu_indexes": [0, 1, 2, 3, 4, 5, 6, 7],
   "smoke": true,
   "engine_options": {
