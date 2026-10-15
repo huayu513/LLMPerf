@@ -201,6 +201,7 @@ class AdaptiveScheduler:
         ranked = sorted((row for row in observations if row.get("score") is not None),
                         key=lambda row: row["score"], reverse=True)
         return redact({
+            "engine": self.metadata.get("engine", "sglang"),
             "environment": environment_summary(self.metadata),
             "scenario": self.metadata["scenario"],
             "workload": {"sha256": self.metadata["expected_source_sha256"],

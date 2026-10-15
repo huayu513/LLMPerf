@@ -1,5 +1,6 @@
 import copy
 import ast
+import io
 import json
 import os
 import subprocess
@@ -14,6 +15,8 @@ from benchmarks.run_deployment_point import compare_parameters
 from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters, server_parameters
 from llmperf.adapters import ReplayAdapter, _compare_server_parameters, read_attempt
 from llmperf.capabilities import EnvironmentSnapshot, GPUInfo
+from llmperf.advisor import LocalAdvisor
+from llmperf.configuration import validate_advisor
 from llmperf.errors import ConfigError
 from llmperf.planner import create_search_plan
 from llmperf.types import DockerConfig, ModelManifest, PlanTask, WorkloadManifest
@@ -159,6 +162,33 @@ class VLLMTests(unittest.TestCase):
             scope["observe_response_item"]({"choices": [{"delta": {"content": "answer"}}]}, 0.75, state)
             self.assertEqual(state["first_activity"], 0.25)
             self.assertEqual(state["last_activity"], 0.75)
+
+    def test_advisor_prompts_use_the_selected_engine(self):
+        settings = validate_advisor({"base_url": "http://localhost/v1", "model": "advisor"})
+        for engine, expected_name in (("sglang", "SGLang"), ("vllm", "vLLM")):
+            for task in ("candidates", "next_experiments"):
+                with self.subTest(engine=engine, task=task):
+                    opener = Mock()
+                    opener.open.return_value = io.BytesIO(
+                        b'{"choices":[{"message":{"content":"{}"}}]}')
+                    with patch("llmperf.advisor.urllib.request.build_opener", return_value=opener):
+                        self.assertEqual(LocalAdvisor(settings).ask(task, {"engine": engine}), {})
+                    request = opener.open.call_args.args[0]
+                    body = json.loads(request.data)
+                    instructions = body["messages"][0]["content"].split("\n\n", 1)[0]
+                    self.assertIn(expected_name, instructions)
+                    self.assertNotIn("SGLang" if engine == "vllm" else "vLLM", instructions)
+                    self.assertIn("Return JSON only", instructions)
+                    self.assertFalse(body["chat_template_kwargs"]["thinking"])
+
+    def test_legacy_advisor_payload_defaults_to_sglang(self):
+        settings = validate_advisor({"base_url": "http://localhost/v1", "model": "advisor"})
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(b'{"choices":[{"message":{"content":"{}"}}]}')
+        with patch("llmperf.advisor.urllib.request.build_opener", return_value=opener):
+            LocalAdvisor(settings).ask("next_experiments", {})
+        body = json.loads(opener.open.call_args.args[0].data)
+        self.assertIn("next SGLang experiments", body["messages"][0]["content"])
 
     def test_explicit_native_backend_and_speculation_are_supported(self):
         self.config.engine_options = {"moe_backend": "marlin", "speculative_config": {

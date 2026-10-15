@@ -311,7 +311,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
                            "reasons": tuple(baseline.get("reasons", ())) }))
     try:
         reply = (advisor or LocalAdvisor(config.advisor)).ask("candidates", {
-            "scenario": scene, "catalog": _visible_catalog(catalog, 0),
+            "engine": config.engine, "scenario": scene, "catalog": _visible_catalog(catalog, 0),
             "tested": [], "remaining_trials": exploration_capacity - 1,
             "request_count": template.metadata["expected_request_count"],
         })

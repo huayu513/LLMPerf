@@ -35,6 +35,7 @@ class LocalAdvisor:
         base = self.settings["base_url"]
         url = base if base.endswith("/chat/completions") else base + (
             "/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+        engine_name = "vLLM" if payload.get("engine") == "vllm" else "SGLang"
         instructions = {
             "scene": (
                 "Extract only facts explicitly supplied by the Chinese user. Return JSON only. "
@@ -49,7 +50,7 @@ class LocalAdvisor:
                 "Do not invent numeric limits or a latency SLO."
             ),
             "candidates": (
-                "You are a SGLang configuration advisor. Return JSON only: "
+                f"You are a {engine_name} configuration advisor. Return JSON only: "
                 "{\"candidates\":[{\"base_id\":\"catalog id\",\"params\":{...},"
                 "\"reason\":\"short Chinese reason\"}]}. Select only base_id values and "
                 "parameter values allowed by the supplied catalog. Return exactly one candidate "
@@ -61,7 +62,7 @@ class LocalAdvisor:
                 "Return JSON only: {\"summary\":\"...\"}. Do not change the computed winner."
             ),
             "next_experiments": (
-                "Select the next SGLang experiments using measured evidence. Return JSON only: "
+                f"Select the next {engine_name} experiments using measured evidence. Return JSON only: "
                 '{"diagnosis":{"kind":"...","evidence_ids":["task id"],"hypothesis":"..."},'
                 '"next_candidates":[{"candidate_id":"shortlist id","reason":"...",'
                 '"expected_effect":"..."}]}. '
