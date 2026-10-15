@@ -1,5 +1,6 @@
 import copy
 import ast
+import io
 import json
 import os
 import subprocess
@@ -12,8 +13,10 @@ from unittest.mock import Mock, patch
 
 from benchmarks.run_deployment_point import compare_parameters
 from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters, server_parameters
-from llmperf.adapters import ReplayAdapter, _compare_server_parameters, read_attempt
+from llmperf.adapters import ReplayAdapter, _compare_server_parameters, _effective_chat_template_kwargs, read_attempt
 from llmperf.capabilities import EnvironmentSnapshot, GPUInfo
+from llmperf.advisor import LocalAdvisor
+from llmperf.configuration import validate_advisor
 from llmperf.errors import ConfigError
 from llmperf.planner import create_search_plan
 from llmperf.types import DockerConfig, ModelManifest, PlanTask, WorkloadManifest
@@ -49,7 +52,7 @@ def environment(count=2):
 
 def native_info(config):
     return {"vllm_config": {
-        "model_config": {"model": "/model", "max_model_len": config.get("max_model_len", 32768),
+        "model_config": {"model": "/model", "max_model_len": config.get("max_model_len", 1048576),
                          "enforce_eager": config.get("enforce_eager", False)},
         "parallel_config": {"tensor_parallel_size": config["tp"], "data_parallel_size": config["dp"],
                             "pipeline_parallel_size": config["pp"], "enable_expert_parallel": False},
@@ -104,7 +107,64 @@ class VLLMTests(unittest.TestCase):
                              candidate.static_config["deployment"]["gpus_per_instance"])
             self.assertNotIn("mem_fraction_static", candidate.static_config)
             self.assertNotIn("chunked_prefill_size", candidate.static_config)
-            self.assertEqual(candidate.static_config["max_model_len"], 32768)
+            self.assertNotIn("max_model_len", candidate.static_config)
+            native = launch_config(plan.metadata, candidate.static_config, 4)
+            self.assertNotIn("--max-model-len", command_args(native, 25080))
+            self.assertNotIn("max_model_len", requested_parameters(native))
+            self.assertEqual(server_parameters(native_info(native))["max_model_len"], 1048576)
+
+    def test_explicit_context_length_is_preserved(self):
+        self.config.engine_options = {"max_model_len": 131072}
+        plan = self.plan()
+        for candidate in plan.candidates:
+            self.assertEqual(candidate.static_config["max_model_len"], 131072)
+            native = launch_config(plan.metadata, candidate.static_config, 4)
+            command = command_args(native, 25080)
+            self.assertEqual(command[command.index("--max-model-len") + 1], "131072")
+            self.assertEqual(requested_parameters(native)["max_model_len"], 131072)
+
+    def test_default_context_does_not_require_an_explicit_length_option(self):
+        snapshot = environment()
+        snapshot.container["capabilities"]["options"].remove("--max-model-len")
+        plan = create_search_plan(self.config, self.model, self.workload, snapshot, self.root / "results")
+        self.assertTrue(plan.candidates)
+        self.config.engine_options = {"max_model_len": 131072}
+        with self.assertRaisesRegex(ConfigError, "max-model-len"):
+            create_search_plan(self.config, self.model, self.workload, snapshot, self.root / "results")
+
+    def test_native_default_template_enables_max_thinking(self):
+        plan = self.plan()
+        expected = {"enable_thinking": True, "thinking": True, "reasoning_effort": "max"}
+        self.assertEqual(self.model.chat_template_kwargs, expected)
+        self.assertEqual(plan.metadata["chat_template_kwargs"], expected)
+        native = launch_config(plan.metadata, plan.candidates[0].static_config, 4)
+        command = command_args(native, 25080)
+        self.assertEqual(json.loads(command[command.index("--default-chat-template-kwargs") + 1]), expected)
+
+    def test_explicit_and_frozen_templates_are_not_upgraded_to_max(self):
+        for template in ({}, {"thinking": False}, {"thinking": True, "reasoning_effort": "high"}):
+            with self.subTest(template=template):
+                metadata = {"chat_template_kwargs": template, "model_snapshot": {"raw": {
+                    "provenance": {"chat_template_kwargs": "model_overrides.chat_template_kwargs"}}}}
+                self.assertEqual(_effective_chat_template_kwargs(metadata), template)
+                native = launch_config({**metadata, "served_model_name": "model"}, {}, 4)
+                command = command_args(native, 25080)
+                self.assertEqual(json.loads(command[command.index("--default-chat-template-kwargs") + 1]), template)
+        frozen = {"thinking": True, "reasoning_effort": "high"}
+        self.assertEqual(_effective_chat_template_kwargs({"chat_template_kwargs": frozen}), frozen)
+
+    def test_replay_without_scene_limit_preserves_each_original_request(self):
+        source = (ROOT / "benchmarks/replay/replay_jsonl_sglang.py").read_text()
+        node = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "apply_output_token_limit")
+        scope = {"Any": object}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "replay-limits", "exec"), scope)
+        for limits in ({}, {"max_tokens": 2048}, {"max_completion_tokens": 4096}):
+            request = {"messages": [{"role": "user", "content": "原始业务请求"}],
+                       "chat_template_kwargs": {"thinking": False}, **limits}
+            original = copy.deepcopy(request)
+            self.assertIs(scope["apply_output_token_limit"](request, None), request)
+            self.assertEqual(request, original)
 
     def test_reasoning_stream_fields_both_count_toward_first_token_activity(self):
         source = (ROOT / "benchmarks/replay/replay_jsonl_sglang.py").read_text()
@@ -123,6 +183,33 @@ class VLLMTests(unittest.TestCase):
             scope["observe_response_item"]({"choices": [{"delta": {"content": "answer"}}]}, 0.75, state)
             self.assertEqual(state["first_activity"], 0.25)
             self.assertEqual(state["last_activity"], 0.75)
+
+    def test_advisor_prompts_use_the_selected_engine(self):
+        settings = validate_advisor({"base_url": "http://localhost/v1", "model": "advisor"})
+        for engine, expected_name in (("sglang", "SGLang"), ("vllm", "vLLM")):
+            for task in ("candidates", "next_experiments"):
+                with self.subTest(engine=engine, task=task):
+                    opener = Mock()
+                    opener.open.return_value = io.BytesIO(
+                        b'{"choices":[{"message":{"content":"{}"}}]}')
+                    with patch("llmperf.advisor.urllib.request.build_opener", return_value=opener):
+                        self.assertEqual(LocalAdvisor(settings).ask(task, {"engine": engine}), {})
+                    request = opener.open.call_args.args[0]
+                    body = json.loads(request.data)
+                    instructions = body["messages"][0]["content"].split("\n\n", 1)[0]
+                    self.assertIn(expected_name, instructions)
+                    self.assertNotIn("SGLang" if engine == "vllm" else "vLLM", instructions)
+                    self.assertIn("Return JSON only", instructions)
+                    self.assertFalse(body["chat_template_kwargs"]["thinking"])
+
+    def test_legacy_advisor_payload_defaults_to_sglang(self):
+        settings = validate_advisor({"base_url": "http://localhost/v1", "model": "advisor"})
+        opener = Mock()
+        opener.open.return_value = io.BytesIO(b'{"choices":[{"message":{"content":"{}"}}]}')
+        with patch("llmperf.advisor.urllib.request.build_opener", return_value=opener):
+            LocalAdvisor(settings).ask("next_experiments", {})
+        body = json.loads(opener.open.call_args.args[0].data)
+        self.assertIn("next SGLang experiments", body["messages"][0]["content"])
 
     def test_explicit_native_backend_and_speculation_are_supported(self):
         self.config.engine_options = {"moe_backend": "marlin", "speculative_config": {

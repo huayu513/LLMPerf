@@ -48,7 +48,7 @@ python3 benchctl.py tune-plan --config configs/experiment.json
 
 如确需合成负载，明确指定输入、输出两个长度上限，再执行 `tune-plan --use-synthetic`；旧的 `--use-captured` 仍可使用，但已是默认行为。合成负载仍采用输入与输出三个档位的九种组合，并尝试用目标镜像中的 tokenizer 校准，失败时保留近似并标明。原始回放不进行合成或校准。
 
-平台按模型、GPU 和镜像能力建立参数目录。智能调优默认使用 `adaptive`：候选池写入不可变的 `plan.json`，本地大模型在生成计划时推荐候选，并在搜索过程中分析实测结果、选择下一批候选。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。规划不启动模型服务进行压测。所有候选在指定业务并发下使用同一固定负载；探索可使用同一小样本子集，最终复验使用完整请求集。吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有明确 SLO 时不会凭空设时延门槛。报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
+平台按模型、GPU 和镜像能力建立参数目录。智能调优默认使用 `adaptive`：候选池写入不可变的 `plan.json`，本地大模型在生成计划时推荐候选，并在搜索过程中分析实测结果、选择下一批候选。初始推荐与运行期选点均向顾问传递引擎类型，提示词区分 SGLang 与 vLLM。候选必须经过参数白名单、取值和现有拓扑约束，模型超时、输出无效或重复时由规则候选补足。规划不启动模型服务进行压测。所有候选在指定业务并发下使用同一固定负载；探索可使用同一小样本子集，最终复验使用完整请求集。吞吐优先按输出 token/s，时延优先按请求 P95 时延选优。没有明确 SLO 时不会凭空设时延门槛。报告保存实际生效配置、长度 usage、复现脚本和试验轨迹。
 
 Web 页面在场景信息不足时保留前文，可直接输入补充信息继续解析；“重新描述”会清空这段对话。
 
@@ -97,6 +97,8 @@ Adaptive 的 `plan.json` 不保存令牌。运行期优先使用 `advisor.api_ke
 
 `configs/experiment.sglang.json` 保留现有 SGLang 配置，并显式设置 `engine: "sglang"`；`configs/experiment.vllm.json` 提供 vLLM 示例。按需修改后，可完整复制到 Web 默认使用的 `configs/experiment.json`，也可在 CLI 中通过 `--config` 直接指定。SGLang 配置中的既有镜像不代表已验证支持 A800 上的 DeepSeek-V4-Flash-0731 原生权重。
 
+vLLM 示例已包含 `advisor`，沿用现有顾问端点、模型及思考和回答预算；令牌通过 `api_key_env: "API_KEY"` 读取，不在示例中重复保存。启动 CLI 或 Web 服务前设置 `export API_KEY='接口令牌'`，令牌不带 `Bearer ` 前缀。使用 `tune-plan → run` 或 Web 智能调优入口调用顾问；普通 `auto` 仍不调用顾问。
+
 ### vLLM-backport：A800 与 DeepSeek-V4-Flash-0731 原生权重
 
 新增配置示例 `configs/experiment.vllm.json`；现有 `configs/experiment.json` 不变。优先使用提供 SM80 支持的 vLLM-backport 镜像，而不是假设普通上游 vLLM 镜像支持 A800。backport 的 `latest-sm80` 是 SM80 标签，裸 `latest` 不是。压测应固定已验证的版本和实际 digest：
@@ -118,12 +120,14 @@ python3 benchctl.py auto --config configs/experiment.vllm.json
 - `gpu_memory_utilization`：默认 0.9；与 SGLang 的静态显存占比不是严格等价概念。
 - `max_num_seqs`：默认 `search.concurrency_max`，每个 trial 按单实例分到的并发收紧；不是客户端总并发的同义词。
 - `max_num_batched_tokens`：默认 4096，表示迭代 token 预算，不等同于 SGLang 的 chunked-prefill-size。
-- `max_model_len`：DeepSeek-V4 默认 32768，其他模型不强制设置；更长业务请求需要显式提高，并在目标机器验证显存。
+- `max_model_len`：默认不设置，不传 `--max-model-len`，由引擎读取模型配置；只有显式配置时才覆盖。不会自动改为 `auto`、固定 32K 或按请求长度估算。默认上下文导致显存不足时明确报错，不缩短业务请求。
 - `enforce_eager`、`enable_expert_parallel`：默认关闭。EP 和通信策略仅按显式配置启用，不映射 SGLang DP Attention。
 - `moe_backend`、`all2all_backend`：可选原生参数，要求镜像广告相应 CLI。`search.backends` 在 vLLM 下表示原生 MoE backend，与 `moe_backend` 不能同时配置；默认交给引擎 AUTO，不调用 SGLang 的解析或去重流程。
 - `speculative_config`：默认不启用；可显式配置 `{"method":"deepseek_mtp","num_speculative_tokens":5}`，需对应 backport 版本支持。不把 SGLang DSpark 直接映射成 vLLM 投机解码。
 
 DeepSeek-V4 的自动工具/推理 parser 映射为 vLLM 的 `deepseek_v4`。显式 `model_overrides` 的 parser 名称优先。镜像必须支持默认聊天模板 kwargs，原始回放请求不做额外改写；请求自身的模板参数仍由服务端合并处理。其他模型若 parser 不兼容，需指定该镜像支持的原生 parser。
+
+与 SGLang 一样，Strict 和智能调优默认使用原始请求：不要求 `max_input_tokens`、`max_output_tokens`，不截断或补齐输入；请求自带的 `max_tokens` / `max_completion_tokens` 原样保留，没有则不添加。显式场景输出上限仍按既有规则收紧请求。旧计划保留冻结的上下文及输出限制，修改配置后应重新生成计划。
 
 运行镜像需要 Python、PyTorch/CUDA/NCCL、aiohttp、bash 和可用的 `vllm serve --help=all`。探测、校准和压测均显式覆盖镜像 ENTRYPOINT。单实例和多实例共用控制器，保留原始 JSONL、流式 usage、吞吐、P95 和失败判定。智能调优与 Web 命令预览使用 vLLM 原生参数目录，不生成 SGLang 的 DPA/DSpark 候选。
 
@@ -169,7 +173,7 @@ python3 benchctl.py auto --config configs/experiment.json
 
 每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。启动前会检查挂载的 `.sh`、`.py` 和 `.env` 文件；如果上传过程把 LF 转成了 CRLF，会在本次 run 的结果目录下生成 LF 副本并使用它，不修改原始 LLMPerf 目录。
 
-自动方案的服务设置默认开启 high thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=high`；只有显式的 `model_overrides.chat_template_kwargs` 会覆盖这个默认。原始请求对象仍原样回放，采样参数和输出长度不参与吞吐调优。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
+自动方案的被测服务默认开启 max thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=max`，SGLang 与 vLLM 使用相同默认值；`model_overrides.chat_template_kwargs` 可显式覆盖，包括关闭思考。镜像和模型模板需支持 `max`，实际是否生效应在目标服务验证，不会静默降为 `high`。原始请求对象仍原样回放，请求自身的模板参数按引擎合并规则处理，采样参数和输出长度不参与吞吐调优。这些是被测服务设置，与 `advisor` 的思考和回答预算独立。旧计划中已冻结的 `high` 或显式模板配置保持不变，要使用新默认值需重新生成计划。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
 
 如果候选服务在启动阶段因为参数不支持、参数不匹配或其他配置错误而失败，当前 candidate 会记录为 `FAILED`；只有服务已经就绪、原生参数证据明确指出所请求的显式 MoE runner backend 不受支持时，后续使用同一 backend 的候选才会记录为 `SKIPPED`。未就绪、缺少证据、OOM、模型加载失败和拓扑相关参数不匹配只影响当前 candidate。引擎自动选择的 `auto` 没有可确认的 backend，不会据此误跳过其他候选。回放阶段的请求失败或 OOM 只停止当前 candidate 的并发分支。失败候选和 backend 跳过原因会写入 `search-state.json`、`results-index.json` 和 `best.json`。需要复查时可在前端对单个 candidate 使用“单独重跑这个参数”，该入口不受自动搜索的 backend 跳过状态影响。
 
@@ -326,7 +330,7 @@ python3 -B -m unittest discover -s tests -v
 PYTHONPATH=.:tests python3 -B -m unittest discover -s verification -v
 ```
 
-本次适配涉及的 `tests/test_configuration.py`、`tests/test_capabilities.py`、`tests/test_docker_runtime.py` 和 `tests/test_vllm.py` 已纳入 Git，可在新克隆中运行。其他历史 `tests/` 和整个 `verification/` 仍为忽略跟踪的本地自测材料，完整回归命令仅适用于保留这些目录的环境。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
+vLLM、配置校验、环境探测、Docker、模型识别、回放适配、服务默认值及 Web 预览的相关 `tests/` 已纳入 Git，可在新克隆中运行。其他历史 `tests/` 和整个 `verification/` 仍为忽略跟踪的本地自测材料，完整回归命令仅适用于保留这些目录的环境。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
 
 复制后的目录可以直接运行 `python3 benchctl.py --help`。实际硬件、checkpoint 和镜像的兼容性由目标机器上的环境探测、探索样本和最终完整输入复跑确认。
 

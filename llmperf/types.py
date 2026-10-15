@@ -8,7 +8,7 @@ from typing import Any
 def _default_chat_template_kwargs() -> Dict[str, Any]:
     return {
         "enable_thinking": True,
-        "reasoning_effort": "high",
+        "reasoning_effort": "max",
         "thinking": True,
     }
 

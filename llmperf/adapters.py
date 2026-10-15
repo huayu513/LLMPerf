@@ -84,7 +84,7 @@ def _normalized_benchmark_dir(source: Path, run_root: Path) -> Path:
 
 _DEFAULT_CHAT_TEMPLATE_KWARGS = {
     "enable_thinking": True,
-    "reasoning_effort": "high",
+    "reasoning_effort": "max",
     "thinking": True,
 }
 
@@ -97,7 +97,7 @@ def _chat_template_provenance(metadata: Mapping[str, Any]) -> Any:
 
 
 def _effective_chat_template_kwargs(metadata: Mapping[str, Any]) -> Any:
-    """Return high-thinking defaults for plans written before that default.
+    """Return max-thinking defaults when legacy template settings are absent.
 
     An explicit model override, including an intentionally empty mapping,
     remains authoritative.  Plans written by the old discovery path carry the

@@ -14,8 +14,6 @@ def vllm_plan_settings(config, model, capabilities):
         "enable_expert_parallel": False,
         "speculative_config": None,
     }
-    if model.raw.get("model_type") == "deepseek_v4":
-        native["max_model_len"] = 32768
     native.update({key: value for key, value in getattr(config, "engine_options", {}).items()
                    if key not in {"tensor_parallel_size", "data_parallel_size", "pipeline_parallel_size"}})
     if native["max_num_batched_tokens"] < native["max_num_seqs"]:
