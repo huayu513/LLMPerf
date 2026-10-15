@@ -182,7 +182,8 @@ class AdaptiveScheduler:
             nearby = [ident for ident in remaining if _family(self.candidates[ident]) == _family(best)]
             nearby.sort(key=lambda ident: sum(
                 self.candidates[ident]["static_config"].get(key) != best["static_config"].get(key)
-                for key in ("mem_fraction_static", "chunked_prefill_size", "max_running_requests")))
+                for key in ("mem_fraction_static", "chunked_prefill_size", "max_running_requests",
+                            "gpu_memory_utilization", "max_num_batched_tokens", "max_num_seqs")))
         offset = (len(self.progress["records"]) * self.policy["batch_size"]) % len(remaining)
         rotated = remaining[offset:] + remaining[:offset]
         ordered = []

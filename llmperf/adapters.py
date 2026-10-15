@@ -17,7 +17,7 @@ from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE, deployment_service_ports
 from .errors import ConfigError
 from .types import DockerConfig, PlanTask
-from benchmarks.server.vllm_config import launch_config, requested_parameters, server_parameters
+from benchmarks.server.vllm_config import launch_config, normalized_speculation, requested_parameters, server_parameters
 
 
 _LINE_ENDING_NORMALIZED_SUFFIXES = frozenset({".env", ".py", ".sh"})
@@ -239,6 +239,8 @@ def _server_info_leaves(value: Any) -> dict[str, Any]:
 
 
 def _values_match(key: str, expected: Any, actual: Any) -> bool:
+    if key == "speculative_config":
+        return normalized_speculation(expected) == normalized_speculation(actual)
     if key in {"backend", "moe_a2a_backend"} and isinstance(expected, str) and expected.lower() == "auto":
         unresolved = {"", "auto"} if key == "moe_a2a_backend" else {"", "auto", "none"}
         return actual is not None and str(actual).strip().lower() not in unresolved
@@ -315,6 +317,7 @@ def _evidence_fingerprint(artifact_dir: Path, summary_path: Path | None, attempt
     ]
     if any(path is None or not path.is_file() for path in paths[:5]):
         return None
+    paths.extend(sorted((artifact_dir / "instances").glob("*/server.*.json")))
     digest = hashlib.sha256()
     for role, path in enumerate(paths):
         if path is not None and path.is_file():
@@ -607,6 +610,7 @@ class ReplayAdapter:
             if task.run_class != "concurrency_rejected":
                 command = ("python3", "/opt/s1slow/benchmarks/run_deployment_point.py", *command[2:])
             env["S1_ENGINE"] = "vllm"
+            env["S1_VLLM_ENV"] = json.dumps(dict(profile_env), sort_keys=True)
             env["S1_VLLM_CONFIG"] = json.dumps(launch_config(
                 {**self.metadata, "chat_template_kwargs": template_kwargs}, dict(static),
                 _effective_max_running_requests(task, static)), sort_keys=True)
@@ -895,6 +899,25 @@ def read_attempt(
                 reasons.append("requested_server_parameters_mismatch")
             if evidence.get("requested_server_parameters") != requested:
                 reasons.append("server_evidence_inconsistent")
+            if metadata.get("engine") == "vllm":
+                instances = static.get("deployment", {}).get("instances", [])
+                if len(instances) > 1:
+                    rows = evidence.get("instances", [])
+                    if not isinstance(rows, list) or len(rows) != len(instances):
+                        reasons.append("instance_evidence_missing")
+                    else:
+                        captured_ids = [row.get("id") for row in rows if isinstance(row, dict)]
+                        if (any(not isinstance(ident, str) for ident in captured_ids)
+                                or sorted(captured_ids) != sorted(instance["id"] for instance in instances)):
+                            reasons.append("instance_evidence_missing")
+                    for instance in instances:
+                        instance_dir = artifact_dir / "instances" / instance["id"]
+                        native_requested = _load_json_object(instance_dir / "server.requested.json")
+                        native_info = _load_json_object(instance_dir / "server.info.json")
+                        if native_requested != expected_requested or native_info is None:
+                            reasons.append("instance_evidence_missing")
+                        elif any(_compare_server_parameters(expected_requested, native_info)):
+                            reasons.append("instance_server_parameter_mismatch")
         if unsupported or computed_unsupported:
             reasons.append("unsupported_server_parameters")
         if mismatched or computed_mismatched:

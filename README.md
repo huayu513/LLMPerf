@@ -93,7 +93,43 @@ Adaptive 的 `plan.json` 不保存令牌。运行期优先使用 `advisor.api_ke
 
 ## 首次部署与启动
 
-机器需要 Python 3.11 或更新版本、NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。模型权重、输入 JSONL 和运行镜像放在目标机器上。镜像需要提供可用的 `sglang serve` 命令，并包含 PyTorch、aiohttp、bash、curl、setsid；程序检查本地镜像，不自动拉取或构建镜像。
+机器需要 Python 3.11 或更新版本、NVIDIA 驱动、Docker 和 NVIDIA Container Toolkit。模型权重、输入 JSONL 和运行镜像放在目标机器上。默认使用 SGLang，镜像需要提供可用的 `sglang serve` 命令，并包含 PyTorch、aiohttp、bash、curl、setsid；也支持通过 `engine: "vllm"` 使用 vLLM 镜像。程序检查本地镜像，不自动拉取或构建镜像。
+
+### vLLM-backport：A800 与 DeepSeek-V4-Flash-0731 原生权重
+
+新增配置示例 `configs/experiment.vllm.json`；现有 `configs/experiment.json` 不变。优先使用提供 SM80 支持的 vLLM-backport 镜像，而不是假设普通上游 vLLM 镜像支持 A800。backport 的 `latest-sm80` 是 SM80 标签，裸 `latest` 不是。压测应固定已验证的版本和实际 digest：
+
+```bash
+IMAGE='lazymio/vllm-backport:latest-sm80'
+docker pull "$IMAGE"
+docker image inspect "$IMAGE" --format '{{range .RepoDigests}}{{println .}}{{end}}'
+python3 benchctl.py doctor --config configs/experiment.vllm.json
+python3 benchctl.py plan --config configs/experiment.vllm.json
+python3 benchctl.py auto --config configs/experiment.vllm.json
+```
+
+先替换示例中的镜像摘要、模型、输入和输出路径。`doctor` 只检查环境与 CLI，不证明模型能加载；`auto` 才启动服务并回放。程序直接只读挂载原始 checkpoint，不执行权重转换。示例固定 TP=8、DP=1、PP=1，避免先枚举明显装不下模型的较小实例；删除三个并行度设置可恢复拓扑搜索。示例开启 smoke，正式结果需设置 `smoke: false`。
+
+`engine` 默认为 `sglang`。`engine_options` 目前仅用于 vLLM，拒绝未知字段和任意 shell/额外参数：
+
+- `tensor_parallel_size`、`data_parallel_size`、`pipeline_parallel_size`：可选的候选拓扑约束，不设置时搜索合法组合。
+- `gpu_memory_utilization`：默认 0.9；与 SGLang 的静态显存占比不是严格等价概念。
+- `max_num_seqs`：默认 `search.concurrency_max`，每个 trial 按单实例分到的并发收紧；不是客户端总并发的同义词。
+- `max_num_batched_tokens`：默认 4096，表示迭代 token 预算，不等同于 SGLang 的 chunked-prefill-size。
+- `max_model_len`：DeepSeek-V4 默认 32768，其他模型不强制设置；更长业务请求需要显式提高，并在目标机器验证显存。
+- `enforce_eager`、`enable_expert_parallel`：默认关闭。EP 和通信策略仅按显式配置启用，不映射 SGLang DP Attention。
+- `moe_backend`、`all2all_backend`：可选原生参数，要求镜像广告相应 CLI。`search.backends` 在 vLLM 下表示原生 MoE backend，与 `moe_backend` 不能同时配置；默认交给引擎 AUTO，不调用 SGLang 的解析或去重流程。
+- `speculative_config`：默认不启用；可显式配置 `{"method":"deepseek_mtp","num_speculative_tokens":5}`，需对应 backport 版本支持。不把 SGLang DSpark 直接映射成 vLLM 投机解码。
+
+DeepSeek-V4 的自动工具/推理 parser 映射为 vLLM 的 `deepseek_v4`。显式 `model_overrides` 的 parser 名称优先。镜像必须支持默认聊天模板 kwargs，原始回放请求不做额外改写；请求自身的模板参数仍由服务端合并处理。其他模型若 parser 不兼容，需指定该镜像支持的原生 parser。
+
+运行镜像需要 Python、PyTorch/CUDA/NCCL、aiohttp、bash 和可用的 `vllm serve --help=all`。探测、校准和压测均显式覆盖镜像 ENTRYPOINT。单实例和多实例共用控制器，保留原始 JSONL、流式 usage、吞吐、P95 和失败判定。智能调优与 Web 命令预览使用 vLLM 原生参数目录，不生成 SGLang 的 DPA/DSpark 候选。
+
+取证使用 `/server_info?config_format=json` 的原生 `vllm_config`，以及 `/v1/models` 的模型别名，逐实例核对模型路径、TP/DP/PP、调度和缓存配置。返回文本 repr、缺失接口、字段不匹配或 usage 缺失均不能作为有效结果；不会拿启动请求伪造实际配置。工具/推理 parser 和模板默认值保存在启动命令中供审计，不宣称这些前端参数已由 `vllm_config` 独立核验。
+
+由于 backport 将 `/server_info` 放在开发接口中，压测进程设置 `VLLM_SERVER_DEV_MODE=1`，同时强制只监听容器内 `127.0.0.1`，不发布压测端口。生成的独立复现脚本关闭开发接口，再通过 Docker 只向宿主机 localhost 发布正常推理端口。不要把开启开发接口的服务改成公开监听。
+
+本地无 GPU 测试覆盖配置、规划、命令、原生参数证据和复现契约；仍需在目标 A800 上确认具体镜像版本的权重加载、正确性和性能。切换引擎或更新代码后应生成新计划，不能跨引擎复用旧 run。
 
 修改唯一的配置文件：
 
@@ -285,10 +321,10 @@ python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume
 
 ```bash
 python3 -B -m unittest discover -s tests -v
-python3 -B -m unittest discover -s verification -v
+PYTHONPATH=.:tests python3 -B -m unittest discover -s verification -v
 ```
 
-`tests/` 与 `verification/` 均为本地自测目录，不纳入 Git 跟踪或提交；上述命令仅适用于本地保留这些目录的环境，新克隆的仓库不包含自测代码。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
+本次适配涉及的 `tests/test_configuration.py`、`tests/test_capabilities.py`、`tests/test_docker_runtime.py` 和 `tests/test_vllm.py` 已纳入 Git，可在新克隆中运行。其他历史 `tests/` 和整个 `verification/` 仍为忽略跟踪的本地自测材料，完整回归命令仅适用于保留这些目录的环境。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
 
 复制后的目录可以直接运行 `python3 benchctl.py --help`。实际硬件、checkpoint 和镜像的兼容性由目标机器上的环境探测、探索样本和最终完整输入复跑确认。
 

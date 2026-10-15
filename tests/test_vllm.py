@@ -1,4 +1,5 @@
 import copy
+import ast
 import json
 import os
 import subprocess
@@ -7,16 +8,21 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from benchmarks.run_deployment_point import compare_parameters
 from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters, server_parameters
-from llmperf.adapters import ReplayAdapter, read_attempt
+from llmperf.adapters import ReplayAdapter, _compare_server_parameters, read_attempt
 from llmperf.capabilities import EnvironmentSnapshot, GPUInfo
 from llmperf.errors import ConfigError
 from llmperf.planner import create_search_plan
 from llmperf.types import DockerConfig, ModelManifest, PlanTask, WorkloadManifest
 from llmperf.workflow import run_workflow
+from llmperf.adaptive import build_candidate_pool
+from llmperf.tuning import _catalog, _from_suggestion
+from web.server import preview_launch
+from benchmarks import run_deployment_point as controller
+from benchmarks.server import vllm_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +106,24 @@ class VLLMTests(unittest.TestCase):
             self.assertNotIn("chunked_prefill_size", candidate.static_config)
             self.assertEqual(candidate.static_config["max_model_len"], 32768)
 
+    def test_reasoning_stream_fields_both_count_toward_first_token_activity(self):
+        source = (ROOT / "benchmarks/replay/replay_jsonl_sglang.py").read_text()
+        node = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "observe_response_item")
+        scope = {"Any": object, "json": json}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "replay-parser", "exec"), scope)
+        for delta in ({"reasoning": "thinking"}, {"reasoning_content": "thinking"},
+                      {"reasoning": "thinking", "reasoning_content": "thinking"}):
+            state = {"usage": None, "finish_reason": None, "first_activity": None,
+                     "last_activity": None, "content_chars": 0, "reasoning_chars": 0,
+                     "tool_call_chunks": 0, "tool_call_chars": 0}
+            scope["observe_response_item"]({"choices": [{"delta": delta}]}, 0.25, state)
+            self.assertEqual(state["reasoning_chars"], 8)
+            self.assertEqual(state["first_activity"], 0.25)
+            scope["observe_response_item"]({"choices": [{"delta": {"content": "answer"}}]}, 0.75, state)
+            self.assertEqual(state["first_activity"], 0.25)
+            self.assertEqual(state["last_activity"], 0.75)
+
     def test_explicit_native_backend_and_speculation_are_supported(self):
         self.config.engine_options = {"moe_backend": "marlin", "speculative_config": {
             "method": "deepseek_mtp", "num_speculative_tokens": 5}}
@@ -110,6 +134,93 @@ class VLLMTests(unittest.TestCase):
         self.assertIn("--moe-backend", command)
         self.assertIn("--speculative-config", command)
         self.assertNotIn("--speculative-algorithm", command)
+        info = native_info(native)
+        info["vllm_config"]["speculative_config"] = {"method": "mtp", "num_speculative_tokens": 5}
+        expected = requested_parameters(native)
+        self.assertEqual(compare_parameters(expected, info)[:2], ([], []))
+        self.assertEqual(_compare_server_parameters(expected, info), ([], []))
+
+    def test_fixed_parallelism_filters_out_smaller_native_weight_instances(self):
+        self.config.engine_options = {"tensor_parallel_size": 8, "data_parallel_size": 1,
+                                      "pipeline_parallel_size": 1}
+        plan = self.plan(8)
+        self.assertEqual(len(plan.candidates), 1)
+        self.assertEqual(plan.candidates[0].tp, 8)
+        self.assertEqual(plan.candidates[0].static_config["deployment"]["instance_count"], 1)
+        self.assertNotIn("tensor_parallel_size", plan.candidates[0].static_config)
+
+    def test_native_tuning_catalog_pool_and_web_preview(self):
+        plan = self.plan()
+        catalog = _catalog(plan, {"target_concurrency": 4})
+        self.assertEqual(set(catalog["knobs"]), {
+            "gpu_memory_utilization", "max_num_seqs", "max_num_batched_tokens"})
+        changed = _from_suggestion({"base_id": plan.candidates[0].id,
+            "params": {"max_num_batched_tokens": 2048, "gpu_memory_utilization": 0.8}}, catalog)
+        self.assertEqual(changed.static_config["max_num_batched_tokens"], 2048)
+        with self.assertRaises(ValueError):
+            _from_suggestion({"base_id": plan.candidates[0].id, "params": {"max_num_seqs": True}}, catalog)
+        pool = build_candidate_pool(list(plan.candidates), catalog["knobs"], 4, 24)
+        self.assertTrue(pool)
+        self.assertTrue(all("max_running_requests" not in candidate.static_config for candidate in pool))
+        self.assertTrue(all(candidate.static_config["max_num_seqs"] <= 4 for candidate in pool))
+        candidate = plan.metadata["candidates"][plan.candidates[0].id]
+        preview = preview_launch(plan.metadata, candidate, 4)
+        self.assertEqual(preview["engine"], "vllm")
+        self.assertIn("--max-num-batched-tokens", preview["server_command_preview"])
+        self.assertNotIn("sglang_command_preview", preview)
+
+    def test_controller_captures_each_native_instance_before_replay(self):
+        metadata, candidate, task = self.fixture(instances=2)
+        spec = ReplayAdapter(metadata, self.root / "run").build_spec(task, 1)
+        output = self.root / "controller"
+        env = {**os.environ, **spec.env, "S1_RESULTS_ROOT": str(output)}
+        config = json.loads(spec.env["S1_VLLM_CONFIG"])
+        info = native_info(config)
+        calls = []
+        def execute(command, **kwargs):
+            calls.append(command)
+            if command[:2] == ["bash", str(controller.LAUNCHER)] and command[2] == "start":
+                state = Path(kwargs["env"]["S1_SERVER_STATE_DIR"])
+                state.mkdir(parents=True)
+                (state / "server.requested.json").write_text(json.dumps(requested_parameters(config)))
+                (state / "server.command.sh").write_text("vllm serve /model --port " + kwargs["env"]["SERVER_PORT"] + "\n")
+            return SimpleNamespace(returncode=0)
+        def fetch(url, **kwargs):
+            if url.endswith("/server_info?config_format=json"):
+                return True, {"vllm_config": info["vllm_config"]}
+            self.assertTrue(url.endswith("/v1/models"), url)
+            return True, info["models"]
+        urls = {}
+        def health(url, **kwargs):
+            urls[url] = urls.get(url, 0) + 1
+            return urls[url] > 1
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", [
+            "controller", "formal", "--profile", "AUTO", "--concurrency", "4"]), \
+                patch.object(controller, "http_ok", side_effect=health), \
+                patch.object(controller, "http_json", side_effect=fetch), \
+                patch.object(controller.subprocess, "run", side_effect=execute):
+            self.assertEqual(controller.main(), 0)
+        evidence = json.loads((output / "server.evidence.json").read_text())
+        self.assertTrue(evidence["resolved"])
+        self.assertEqual(len(evidence["instances"]), 2)
+        self.assertEqual(sum(command[1] == str(controller.REPLAY) for command in calls), 1)
+        for instance in candidate.static_config["deployment"]["instances"]:
+            self.assertTrue((output / "instances" / instance["id"] / "server.info.json").is_file())
+        (output / "formal.summary.json").write_text(json.dumps({"jsonl_sha256": "a" * 64,
+            "request_count": 4, "successes": 4, "failures": 0,
+            "server_usage_available": 4, "server_usage_missing": 0,
+            "completion_tokens": 40, "measured_seconds": 2, "output_tokens_per_second": 20,
+            "base_urls": ["http://127.0.0.1:25080", "http://127.0.0.1:25336"]}))
+        (output / "container-exit-code").write_text("0\n")
+        result = read_attempt(output, task, metadata)
+        self.assertEqual(result["status"], "VALID", result["reasons"])
+        damaged = output / "instances" / "i1" / "server.info.json"
+        payload = json.loads(damaged.read_text())
+        payload["vllm_config"]["parallel_config"]["tensor_parallel_size"] = 99
+        damaged.write_text(json.dumps(payload))
+        result = read_attempt(output, task, metadata)
+        self.assertIn("instance_server_parameter_mismatch", result["reasons"])
+        self.assertNotEqual(result["status"], "VALID")
 
     def test_missing_required_options_and_conflicting_backends_fail_closed(self):
         self.config.search.backends = ("marlin",)
@@ -173,11 +284,13 @@ class VLLMTests(unittest.TestCase):
 
     def test_launcher_argv_and_reproduction_keep_dev_endpoints_private(self):
         metadata, candidate, task = self.fixture()
+        metadata["profile_env"] = {"VLLM_DSV4_SM80_FUSE_PRE_GATE": "1"}
         spec = ReplayAdapter(metadata, self.root / "run").build_spec(task, 1)
         process = subprocess.run(["bash", str(ROOT / "benchmarks/server/launch_server.sh"), "argv-json", "AUTO"],
             env={**os.environ, **spec.env, "S1_PYTHON_BIN": sys.executable}, capture_output=True, text=True)
         self.assertEqual(process.returncode, 0, process.stderr)
         argv = json.loads(process.stdout)
+        self.assertIn("VLLM_DSV4_SM80_FUSE_PRE_GATE=1", argv["env"])
         self.assertEqual(argv["argv"][argv["argv"].index("--host") + 1], "127.0.0.1")
         attempt = self.root / "reproduce"
         attempt.mkdir()
@@ -188,6 +301,23 @@ class VLLMTests(unittest.TestCase):
         self.assertNotIn("VLLM_SERVER_DEV_MODE=1", text)
         self.assertIn("--entrypoint ''", text)
         self.assertIn("--host 0.0.0.0", text)
+
+    def test_lifecycle_refuses_reused_pids_and_unmanaged_process_groups(self):
+        record = json.dumps({"pid": 4321, "start_time": "100"})
+        fields = ["S"] + ["0"] * 18 + ["100"]
+        stat = "4321 (vllm serve) " + " ".join(fields)
+        with patch.object(Path, "read_text", side_effect=[record, stat]), \
+                patch.object(vllm_server.os, "getpgid", return_value=4321):
+            self.assertEqual(vllm_server.managed_pid(self.root), 4321)
+        fields[-1] = "101"
+        stale = "4321 (vllm serve) " + " ".join(fields)
+        with patch.object(Path, "read_text", side_effect=[record, stale]), \
+                patch.object(vllm_server.os, "killpg") as kill:
+            vllm_server.stop(self.root)
+            kill.assert_not_called()
+        with patch.object(Path, "read_text", side_effect=[record, stat]), \
+                patch.object(vllm_server.os, "getpgid", return_value=999):
+            self.assertIsNone(vllm_server.managed_pid(self.root))
 
     def test_workflow_preserves_engine_and_skips_sglang_backend_resolver(self):
         model = self.root / "model"

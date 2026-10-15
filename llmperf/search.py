@@ -585,11 +585,19 @@ def execute_search(plan, run_root, executor=None, resume=False):
         base = candidates[provisional['candidate_id']]
         options = metadata.get('environment', {}).get('container', {}).get('capabilities', {}).get('options', [])
         changes = []
+        if metadata.get('engine') == 'vllm':
+            if '--gpu-memory-utilization' in options:
+                changes += [('gpu_memory_utilization', .90), ('gpu_memory_utilization', .80)]
+            if '--max-num-batched-tokens' in options:
+                changes += [('max_num_batched_tokens', value) for value in (4096, 16384)
+                            if value >= base['static_config'].get('max_num_seqs', 1)]
         if '--mem-fraction-static' in options:
             changes += [('mem_fraction_static', .90), ('mem_fraction_static', .80)]
         if '--chunked-prefill-size' in options:
             changes += [('chunked_prefill_size', 4096), ('chunked_prefill_size', 16384)]
         for key, value in changes:
+            if metadata.get('engine') == 'vllm' and base['static_config'].get(key) == value:
+                continue
             tuned = copy.deepcopy(base)
             tuned['static_config'][key] = value
             tuned['config_hash'] = fingerprint(tuned['static_config'])

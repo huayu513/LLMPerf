@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 if __package__:
-    from .server.vllm_config import server_parameters
+    from .server.vllm_config import normalized_speculation, server_parameters
 else:
-    from server.vllm_config import server_parameters
+    from server.vllm_config import normalized_speculation, server_parameters
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -136,6 +136,7 @@ def manifest(path: Path, args: argparse.Namespace, deployment: dict[str, Any], s
             data = {}
     data.update({
         "schema_version": 1,
+        "engine": os.environ.get("S1_ENGINE", "sglang"),
         "profile": args.profile,
         "class": args.run_class,
         "mode": args.mode,
@@ -184,6 +185,8 @@ def server_info_leaves(server_info: dict[str, Any]) -> dict[str, Any]:
 
 
 def values_match(key: str, expected: Any, actual: Any) -> bool:
+    if key == "speculative_config":
+        return normalized_speculation(expected) == normalized_speculation(actual)
     if key in {"backend", "moe_a2a_backend"} and isinstance(expected, str) and expected.lower() == "auto":
         unresolved = {"", "auto"} if key == "moe_a2a_backend" else {"", "auto", "none"}
         return actual is not None and str(actual).strip().lower() not in unresolved
@@ -314,7 +317,10 @@ def main() -> int:
             for offset, instance in enumerate(instances):
                 env = instance_env(base_env, results_root, instance, service_ports[offset])
                 command = ["bash", str(LAUNCHER), "dry-run", args.profile]
-                subprocess.run(command, env=env, check=True)
+                if engine == "vllm":
+                    subprocess.run(command, env=env, check=True)
+                else:
+                    print(" ".join(command[1:]), "CUDA_VISIBLE_DEVICES=" + env["CUDA_VISIBLE_DEVICES"])
             final_exit = 0
             final_state = "complete"
             return final_exit
@@ -362,11 +368,15 @@ def main() -> int:
             instance_dir = results_root / "instances" / str(instance["id"])
             requested = json.loads((state_dir / "server.requested.json").read_text(encoding="utf-8"))
             info_path = "/server_info?config_format=json" if engine == "vllm" else "/get_server_info"
-            captured, info = http_json(base_urls[offset].rstrip("/") + info_path)
+            captured, info = http_json(base_urls[offset].rstrip("/") + info_path,
+                                       timeout=60.0 if engine == "vllm" else 10.0)
             if engine == "vllm":
                 models_ok, models = http_json(base_urls[offset].rstrip("/") + "/v1/models")
                 info["models"] = models
                 captured = captured and models_ok and isinstance(info.get("vllm_config"), dict)
+                if not captured:
+                    print("vLLM runtime evidence unavailable: require JSON /server_info?config_format=json "
+                          "and /v1/models; inspect the pinned image version", file=sys.stderr)
             atomic_json(instance_dir / "server.info.json", info)
             for name in ("server.command.sh", "server.meta", "server.requested.json"):
                 source = state_dir / name

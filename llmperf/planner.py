@@ -214,6 +214,13 @@ def create_search_plan(config, model, workload, env, result_dir):
                             world = tp * pp if dpa else tp * actual_dp * pp
                             if world != n:
                                 continue
+                            if engine == 'vllm' and any(
+                                getattr(config, 'engine_options', {}).get(key, value) != value
+                                for key, value in (('tensor_parallel_size', tp),
+                                                   ('data_parallel_size', actual_dp),
+                                                   ('pipeline_parallel_size', pp))
+                            ):
+                                continue
                             for backend in backends:
                                 for dspark in ([False, True] if dspark_supported and pp == 1 else [False]):
                                     static = dict(tp=tp, dp=actual_dp, pp=pp, dp_attention=dpa,

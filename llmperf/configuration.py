@@ -332,12 +332,14 @@ def _engine_options(value: Any, engine: str) -> dict[str, Any]:
         "max_model_len", "gpu_memory_utilization", "max_num_seqs",
         "max_num_batched_tokens", "enforce_eager", "enable_expert_parallel",
         "all2all_backend", "moe_backend", "speculative_config",
+        "tensor_parallel_size", "data_parallel_size", "pipeline_parallel_size",
     }
     _unknown(data, allowed, "engine_options")
     result = {}
     for key, value in data.items():
         label = f"engine_options.{key}"
-        if key in {"max_model_len", "max_num_seqs", "max_num_batched_tokens"}:
+        if key in {"max_model_len", "max_num_seqs", "max_num_batched_tokens",
+                   "tensor_parallel_size", "data_parallel_size", "pipeline_parallel_size"}:
             result[key] = _integer(value, label, 1)
         elif key == "gpu_memory_utilization":
             result[key] = _number(value, label, 0.0, strict=True)

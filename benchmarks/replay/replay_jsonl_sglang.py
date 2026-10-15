@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical full-request Chat Completions replay client for SGLang.
+"""Canonical full-request Chat Completions replay client for OpenAI-compatible engines.
 
 By default each JSONL row's ``request`` object is sent unchanged. An explicitly
 requested output-token ceiling caps generation limits without editing the source
@@ -273,6 +273,8 @@ def observe_response_item(
             delta = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         has_activity = False
         reasoning = delta.get("reasoning_content")
+        if not isinstance(reasoning, str) or not reasoning:
+            reasoning = delta.get("reasoning")
         content = delta.get("content")
         tool_calls = delta.get("tool_calls")
         if isinstance(reasoning, str) and reasoning:

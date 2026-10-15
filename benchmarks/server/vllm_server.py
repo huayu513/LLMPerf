@@ -5,13 +5,17 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from vllm_config import command_args, requested_parameters
+if __package__:
+    from .vllm_config import command_args, requested_parameters
+else:
+    from vllm_config import command_args, requested_parameters
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -40,12 +44,18 @@ def stop(state: Path) -> None:
     pid = managed_pid(state)
     if pid is None:
         return
-    os.killpg(pid, signal.SIGTERM)
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
     deadline = time.monotonic() + 20
     while managed_pid(state) is not None and time.monotonic() < deadline:
         time.sleep(0.2)
     if managed_pid(state) is not None:
-        os.killpg(pid, signal.SIGKILL)
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def main() -> int:
@@ -64,8 +74,12 @@ def main() -> int:
         parser.error("vLLM only supports the AUTO profile")
     config = json.loads(os.environ["S1_VLLM_CONFIG"])
     command = command_args(config, int(os.environ["SERVER_PORT"]))
-    environment = {"VLLM_SERVER_DEV_MODE": "1",
-                   "CUDA_VISIBLE_DEVICES": os.environ["CUDA_VISIBLE_DEVICES"]}
+    environment = json.loads(os.environ.get("S1_VLLM_ENV", "{}"))
+    if not isinstance(environment, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in environment.items()
+    ):
+        parser.error("S1_VLLM_ENV must contain string environment values")
+    environment.update(VLLM_SERVER_DEV_MODE="1", CUDA_VISIBLE_DEVICES=os.environ["CUDA_VISIBLE_DEVICES"])
     if args.action == "argv-json":
         print(json.dumps({"argv": command, "env": [f"{key}={value}" for key, value in environment.items()]}))
         return 0
@@ -75,6 +89,11 @@ def main() -> int:
         return 0
     if managed_pid(state) is not None:
         parser.error("a managed vLLM process is already running")
+    executable = shutil.which("vllm", path=environment.get("PATH", os.environ.get("PATH")))
+    if executable is None:
+        parser.error("vLLM executable is missing from PATH")
+    command[0] = executable
+    shell_command = "env " + shlex.join([f"{key}={value}" for key, value in environment.items()] + command)
     state.mkdir(parents=True, exist_ok=True)
     atomic_json(state / "server.requested.json", requested_parameters(config))
     (state / "server.command.sh").write_text(shell_command + "\n")

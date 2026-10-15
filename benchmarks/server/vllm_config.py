@@ -26,6 +26,12 @@ ENGINE_FIELDS = {
 }
 
 
+def normalized_speculation(value):
+    if isinstance(value, dict) and value.get("method") == "deepseek_mtp":
+        return {**value, "method": "mtp"}
+    return value
+
+
 def launch_config(metadata: dict, static: dict, max_num_seqs: int) -> dict:
     config = {key: value for key, value in static.items() if key in NATIVE_OPTIONS}
     config.update({
