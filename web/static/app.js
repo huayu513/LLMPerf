@@ -393,7 +393,7 @@ function renderCandidates() {
   }
   box.className = "table-wrap";
   var html = '<table><thead><tr>';
-  ["candidate", "状态", "拓扑", "GPU", "TP/DP/PP", "DPA", "backend", "DSpark", "对照组", "功能组合", "mem", "chunked", "当前最佳 trial"].forEach(function(name) {
+  ["candidate", "状态", "拓扑", "GPU", "TP/DP/PP", "DPA", "backend", "DSpark", "对照组", "功能组合", "显存参数", "批处理参数", "当前最佳 trial"].forEach(function(name) {
     html += "<th>" + escapeHtml(name) + "</th>";
   });
   html += "</tr></thead><tbody>";
@@ -409,8 +409,8 @@ function renderCandidates() {
     html += "<td>" + pretty(c.dspark) + "</td>";
     html += "<td class=\"code\">" + escapeHtml(c.comparison_group || "-") + "</td>";
     html += "<td>" + escapeHtml(c.feature_variant || "-") + "</td>";
-    html += "<td>" + pretty(c.mem_fraction_static) + "</td>";
-    html += "<td>" + pretty(c.chunked_prefill_size) + "</td>";
+    html += "<td>" + pretty(c.engine === "vllm" ? c.gpu_memory_utilization : c.mem_fraction_static) + "</td>";
+    html += "<td>" + pretty(c.engine === "vllm" ? c.max_num_batched_tokens : c.chunked_prefill_size) + "</td>";
     html += "<td>" + (c.best_output_tokens_per_second ? pretty(c.best_output_tokens_per_second) + " @ c" + pretty(c.best_concurrency) : "-") + "</td>";
     html += "</tr>";
   });
@@ -464,13 +464,14 @@ async function openCandidate(candidateId) {
   state.candidateDetail = await api(runPath("/candidates/" + encodeURIComponent(candidateId)));
   var detail = state.candidateDetail;
   el("drawer-title").textContent = candidateId;
-  var command = ((detail.launch_preview && detail.launch_preview.sglang_command_preview) || []).join(" ");
+  var command = ((detail.launch_preview && (detail.launch_preview.server_command_preview || detail.launch_preview.sglang_command_preview)) || []).join(" ");
   var html = renderKV([
     ["默认重跑 concurrency", detail.default_debug && detail.default_debug.concurrency],
     ["默认 run_class", detail.default_debug && detail.default_debug.run_class],
     ["默认 mode", detail.default_debug && detail.default_debug.mode],
     ["served model", detail.metadata && detail.metadata.served_model_name],
     ["image", detail.metadata && detail.metadata.image],
+    ["engine", detail.metadata && detail.metadata.engine],
     ["service_port", detail.metadata && detail.metadata.service_port],
     ["tool parser", detail.metadata && detail.metadata.tool_call_parser],
     ["reasoning parser", detail.metadata && detail.metadata.reasoning_parser]

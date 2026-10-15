@@ -17,6 +17,7 @@ from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE, deployment_service_ports
 from .errors import ConfigError
 from .types import DockerConfig, PlanTask
+from benchmarks.server.vllm_config import launch_config, normalized_speculation, requested_parameters, server_parameters
 
 
 _LINE_ENDING_NORMALIZED_SUFFIXES = frozenset({".env", ".py", ".sh"})
@@ -125,7 +126,7 @@ def _static_config(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _effective_max_running_requests(task: PlanTask, static: Mapping[str, Any]) -> int:
-    configured = static.get("max_running_requests")
+    configured = static.get("max_num_seqs", static.get("max_running_requests"))
     configured_int = max(1, int(configured)) if configured is not None else None
     if str(task.mode).replace("_", "-") == "open-loop":
         return configured_int or max(1, int(task.concurrency or 1))
@@ -229,6 +230,8 @@ def _server_info_leaves(value: Any) -> dict[str, Any]:
     # Only direct argument fields can establish the launch parameter values.
     if not isinstance(value, Mapping):
         return {}
+    if "vllm_config" in value:
+        return server_parameters(dict(value))
     arguments = value.get("server_args", value)
     if not isinstance(arguments, Mapping):
         return {}
@@ -236,6 +239,8 @@ def _server_info_leaves(value: Any) -> dict[str, Any]:
 
 
 def _values_match(key: str, expected: Any, actual: Any) -> bool:
+    if key == "speculative_config":
+        return normalized_speculation(expected) == normalized_speculation(actual)
     if key in {"backend", "moe_a2a_backend"} and isinstance(expected, str) and expected.lower() == "auto":
         unresolved = {"", "auto"} if key == "moe_a2a_backend" else {"", "auto", "none"}
         return actual is not None and str(actual).strip().lower() not in unresolved
@@ -312,6 +317,7 @@ def _evidence_fingerprint(artifact_dir: Path, summary_path: Path | None, attempt
     ]
     if any(path is None or not path.is_file() for path in paths[:5]):
         return None
+    paths.extend(sorted((artifact_dir / "instances").glob("*/server.*.json")))
     digest = hashlib.sha256()
     for role, path in enumerate(paths):
         if path is not None and path.is_file():
@@ -422,6 +428,9 @@ def _local_loopback_url(value: Any, allowed_ports: set[int]) -> bool:
 def _expected_requested_parameters(metadata: Mapping[str, Any], task: PlanTask) -> dict[str, Any]:
     candidate = _candidate(metadata, task)
     static = _static_config(candidate)
+    if metadata.get("engine") == "vllm":
+        return requested_parameters(launch_config(
+            dict(metadata), dict(static), _effective_max_running_requests(task, static)))
     expected: dict[str, Any] = {
         "model_path": "/model",
         "max_running_requests": _effective_max_running_requests(task, static),
@@ -595,6 +604,19 @@ class ReplayAdapter:
         env["MAX_RUNNING_REQUESTS"] = str(_effective_max_running_requests(task, static))
         logical_gpu_count = len(gpu_indexes) if gpu_indexes else 1
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in range(logical_gpu_count))
+        if self.metadata.get("engine") == "vllm":
+            if controller_class not in {"smoke", "diagnostic", "formal"}:
+                raise ConfigError("unsupported vLLM controller class")
+            if task.run_class != "concurrency_rejected":
+                command = ("python3", "/opt/s1slow/benchmarks/run_deployment_point.py", *command[2:])
+            env["S1_ENGINE"] = "vllm"
+            env["S1_VLLM_ENV"] = json.dumps(dict(profile_env), sort_keys=True)
+            env["S1_VLLM_CONFIG"] = json.dumps(launch_config(
+                {**self.metadata, "chat_template_kwargs": template_kwargs}, dict(static),
+                _effective_max_running_requests(task, static)), sort_keys=True)
+            if not deployment:
+                deployment = {"instance_count": 1, "instances": [{"id": "i0", "logical_gpu_indexes": list(range(logical_gpu_count))}]}
+                env["S1_DEPLOYMENT"] = json.dumps(deployment)
         mounts = (
             Mount(model_host, "/model", True),
             Mount(jsonl_host, "/run/workload/input.jsonl", True),
@@ -609,6 +631,7 @@ class ReplayAdapter:
             network_mode=str(self._value("network_mode", default="bridge")),
             shm_size=str(self._value("shm_size", default="16g")),
             ipc=str(self._value("ipc", default="host")),
+            entrypoint="" if self.metadata.get("engine") == "vllm" else None,
         )
 
     build_task_spec = build_spec
@@ -658,6 +681,9 @@ class ReplayAdapter:
             return None
         if not command_lines:
             return None
+        if spec.env.get("S1_ENGINE") == "vllm":
+            command_lines = [line.replace("VLLM_SERVER_DEV_MODE=1", "VLLM_SERVER_DEV_MODE=0")
+                             .replace("--host 127.0.0.1", "--host 0.0.0.0") for line in command_lines]
 
         # The captured command already contains the complete server-side
         # environment (``setsid env ... sglang serve ...``). Keep only the
@@ -734,7 +760,7 @@ class ReplayAdapter:
             "# Host-side reproduction wrapper generated by LLMPerf.\n"
             "# It starts the same Docker image/model mount/GPU count and then\n"
             "# executes the captured server command(s) embedded below.\n"
-            "# The container publishes the SGLang port on localhost.\n"
+            "# The container publishes the inference server port on localhost.\n"
             f"exec {shlex.join(argv)}\n",
             encoding="utf-8",
         )
@@ -806,10 +832,12 @@ def read_attempt(
     controller = _load_json_object(artifact_dir / "run_manifest.json")
     static = _static_config(_candidate(metadata, task))
     effective_static = dict(static)
-    effective_static["max_running_requests"] = _effective_max_running_requests(task, static)
+    capacity_key = "max_num_seqs" if metadata.get("engine") == "vllm" else "max_running_requests"
+    effective_static[capacity_key] = _effective_max_running_requests(task, static)
     server_command_path = artifact_dir / "server.command.sh"
     server_reproduce_path = artifact_dir / "server.reproduce.sh"
     result = {
+        "engine": metadata.get("engine", "sglang"),
         "status": "INCONCLUSIVE",
         "reasons": [],
         "output_tokens_per_second": 0.0,
@@ -871,6 +899,25 @@ def read_attempt(
                 reasons.append("requested_server_parameters_mismatch")
             if evidence.get("requested_server_parameters") != requested:
                 reasons.append("server_evidence_inconsistent")
+            if metadata.get("engine") == "vllm":
+                instances = static.get("deployment", {}).get("instances", [])
+                if len(instances) > 1:
+                    rows = evidence.get("instances", [])
+                    if not isinstance(rows, list) or len(rows) != len(instances):
+                        reasons.append("instance_evidence_missing")
+                    else:
+                        captured_ids = [row.get("id") for row in rows if isinstance(row, dict)]
+                        if (any(not isinstance(ident, str) for ident in captured_ids)
+                                or sorted(captured_ids) != sorted(instance["id"] for instance in instances)):
+                            reasons.append("instance_evidence_missing")
+                    for instance in instances:
+                        instance_dir = artifact_dir / "instances" / instance["id"]
+                        native_requested = _load_json_object(instance_dir / "server.requested.json")
+                        native_info = _load_json_object(instance_dir / "server.info.json")
+                        if native_requested != expected_requested or native_info is None:
+                            reasons.append("instance_evidence_missing")
+                        elif any(_compare_server_parameters(expected_requested, native_info)):
+                            reasons.append("instance_server_parameter_mismatch")
         if unsupported or computed_unsupported:
             reasons.append("unsupported_server_parameters")
         if mismatched or computed_mismatched:

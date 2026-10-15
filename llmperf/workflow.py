@@ -21,6 +21,7 @@ from .types import DockerConfig, PathConfig
 
 def _probe_config(config, root):
     return SimpleNamespace(image=config.image, docker=config.docker, gpu_indexes=config.gpu_indexes,
+        engine=getattr(config, 'engine', 'sglang'),
         paths=PathConfig(config.model_path, config.input_path, root))
 
 
@@ -66,7 +67,7 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     if stop_after == 'prepare':
         return {'command': stop_after, 'status': 'PASS', 'result_dir': str(root), 'requests': index['count']}
     plan = create_search_plan(config, model, workload, env, root)
-    if model.raw.get('is_moe'):
+    if config.engine == 'sglang' and model.raw.get('is_moe'):
         print(json.dumps({'event': 'backend_resolution_start',
                           'candidates': len(plan.candidates)}), flush=True)
         image = env.image.to_dict() if hasattr(env.image, 'to_dict') else dict(env.image)
@@ -147,6 +148,7 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
         raise ConfigError('replay index does not match the saved plan')
     settings = metadata['configuration']
     config = SimpleNamespace(image=metadata['image'], model_path=Path(metadata['model_host']),
+        engine=settings.get('engine', 'sglang'),
         input_path=source, gpu_indexes=settings.get('gpu_indexes'), docker=DockerConfig(**settings['docker']))
     current = probe(_probe_config(config, root))
     if current.status == 'FAIL':

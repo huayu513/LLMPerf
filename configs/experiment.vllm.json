@@ -1,0 +1,24 @@
+{
+  "engine": "vllm",
+  "model_path": "/var/lib/docker/models/DeepSeek-V4-Flash-0731",
+  "input_path": "/data/workloads/input.jsonl",
+  "image": "lazymio/vllm-backport@sha256:<替换为本地SM80镜像的64位摘要>",
+  "output_dir": "/data/LLMPerf/results",
+  "gpu_indexes": [0, 1, 2, 3, 4, 5, 6, 7],
+  "smoke": true,
+  "engine_options": {
+    "tensor_parallel_size": 8,
+    "data_parallel_size": 1,
+    "pipeline_parallel_size": 1,
+    "max_model_len": 32768,
+    "gpu_memory_utilization": 0.9,
+    "max_num_seqs": 64,
+    "max_num_batched_tokens": 4096,
+    "enforce_eager": false
+  },
+  "search": {
+    "start_concurrency": 8,
+    "concurrency_max": 64,
+    "max_trials": 64
+  }
+}

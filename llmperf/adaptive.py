@@ -31,7 +31,8 @@ def launch_identity(static: dict) -> str:
 def normalize_candidate(candidate: CandidateConfig, target: int) -> CandidateConfig:
     static = copy.deepcopy(candidate.static_config)
     task = PlanTask("normalize", 0, candidate.id, concurrency=target)
-    static["max_running_requests"] = _effective_max_running_requests(task, static)
+    capacity_key = "max_num_seqs" if static.get("engine") == "vllm" else "max_running_requests"
+    static[capacity_key] = _effective_max_running_requests(task, static)
     return replace(candidate, static_config=static, config_hash=fingerprint(static))
 
 
@@ -181,7 +182,8 @@ class AdaptiveScheduler:
             nearby = [ident for ident in remaining if _family(self.candidates[ident]) == _family(best)]
             nearby.sort(key=lambda ident: sum(
                 self.candidates[ident]["static_config"].get(key) != best["static_config"].get(key)
-                for key in ("mem_fraction_static", "chunked_prefill_size", "max_running_requests")))
+                for key in ("mem_fraction_static", "chunked_prefill_size", "max_running_requests",
+                            "gpu_memory_utilization", "max_num_batched_tokens", "max_num_seqs")))
         offset = (len(self.progress["records"]) * self.policy["batch_size"]) % len(remaining)
         rotated = remaining[offset:] + remaining[:offset]
         ordered = []

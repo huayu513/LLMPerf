@@ -47,6 +47,17 @@ def _catalog(plan: Plan, scenario: dict) -> dict:
                   .get("capabilities", {}).get("options", []))
     target = scenario["target_concurrency"]
     knobs = {}
+    if plan.metadata.get("engine") == "vllm":
+        if "--gpu-memory-utilization" in options:
+            knobs["gpu_memory_utilization"] = [0.75, 0.8, 0.85, 0.9]
+        if "--max-num-seqs" in options:
+            ceiling = max(candidate.static_config["max_num_batched_tokens"] for candidate in plan.candidates)
+            knobs["max_num_seqs"] = sorted({min(ceiling, max(1, target // 2)), min(ceiling, target)})
+        if "--max-num-batched-tokens" in options:
+            minimum = max(knobs.get("max_num_seqs", [target]))
+            knobs["max_num_batched_tokens"] = sorted({max(minimum, value) for value in (2048, 4096, 8192, 16384)})
+        return {"version": 1, "base_candidates": [asdict(candidate) for candidate in plan.candidates],
+                "knobs": knobs, "semantics": "vLLM-native options; omitted means keep the base value"}
     if "--mem-fraction-static" in options:
         knobs["mem_fraction_static"] = [0.75, 0.8, 0.85, 0.9]
     if "--chunked-prefill-size" in options:
@@ -81,7 +92,7 @@ def _from_suggestion(item: Any, catalog: dict) -> CandidateConfig:
     if not isinstance(params, dict) or set(params) - set(catalog["knobs"]):
         raise ValueError("candidate params are outside the capability catalog")
     for key, value in params.items():
-        expected_type = int if key in {"chunked_prefill_size", "max_running_requests"} else float
+        expected_type = type(catalog["knobs"][key][0])
         if type(value) is not expected_type or value not in catalog["knobs"][key]:
             raise ValueError(f"unsupported value for {key}")
     reason = item.get("reason", "")
@@ -165,6 +176,7 @@ def _calibrate_scene(root: Path, config, model, scene: dict) -> dict:
                  "--output", "/run/scene/calibration-result.json"),
         network_mode=config.docker.network_mode, shm_size=config.docker.shm_size,
         ipc=config.docker.ipc,
+        entrypoint="" if getattr(config, "engine", "sglang") == "vllm" else None,
     )
     try:
         run = DockerRuntime().run(spec, data_dir / "calibration.log")
@@ -221,7 +233,7 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
     if index["jsonl_sha256"] != workload.sha256:
         raise ConfigError("workload changed during preparation")
     plan = create_search_plan(effective_config, model, workload, env, root)
-    if model.raw.get("is_moe"):
+    if effective_config.engine == "sglang" and model.raw.get("is_moe"):
         image = env.image.to_dict() if hasattr(env.image, "to_dict") else dict(env.image)
         if image.get("image_id"):
             resolutions = resolve_in_image(plan, effective_config, root)

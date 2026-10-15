@@ -43,6 +43,7 @@ from llmperf.artifacts import write_json_atomic  # noqa: E402
 from llmperf.advisor import extract_and_save_scenario  # noqa: E402
 from llmperf.docker_runtime import DockerRuntime  # noqa: E402
 from llmperf.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
+from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters
 from llmperf.search import (  # noqa: E402
     _candidate_gpu_count,
     _next_concurrency,
@@ -209,6 +210,7 @@ def candidate_static(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
     plan = json_load(run_dir / "plan.json", {})
+    metadata = plan.get("metadata", {}) if isinstance(plan, dict) else {}
     raw_candidates = plan.get("candidates", []) if isinstance(plan, dict) else []
     rows_doc = json_load(run_dir / "results-index.json", {})
     rows = rows_doc.get("rows", []) if isinstance(rows_doc, dict) else []
@@ -246,6 +248,7 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
             latest_reasons = latest.get("reasons") if isinstance(latest, dict) else []
         result.append({
             "id": candidate.get("id"),
+            "engine": metadata.get("engine", "sglang"),
             "plan_order": plan_order,
             "tp": candidate.get("tp", static.get("tp")),
             "dp": candidate.get("dp", static.get("dp")),
@@ -263,6 +266,9 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
             "mem_fraction_static": static.get("mem_fraction_static"),
             "max_running_requests": static.get("max_running_requests"),
             "chunked_prefill_size": static.get("chunked_prefill_size"),
+            "gpu_memory_utilization": static.get("gpu_memory_utilization"),
+            "max_num_batched_tokens": static.get("max_num_batched_tokens"),
+            "max_num_seqs": static.get("max_num_seqs"),
             "attempt_count": len(attempts),
             "latest_status": latest_status,
             "latest_reasons": latest_reasons,
@@ -345,6 +351,7 @@ def candidate_detail(run_dir: Path, candidate_id: str) -> dict[str, Any]:
     return {
         "candidate": candidate,
         "metadata": {
+            "engine": metadata.get("engine", "sglang"),
             "served_model_name": metadata.get("served_model_name"),
             "tool_call_parser": metadata.get("tool_call_parser"),
             "reasoning_parser": metadata.get("reasoning_parser"),
@@ -415,13 +422,21 @@ def preview_launch(metadata: dict[str, Any], candidate: dict[str, Any], concurre
         instance_count = max(1, int(deployment.get("instance_count", 1)))
     except (TypeError, ValueError):
         pass
-    configured = static.get("max_running_requests")
+    configured = static.get("max_num_seqs", static.get("max_running_requests"))
     try:
         configured_int = max(1, int(configured)) if configured is not None else None
     except (TypeError, ValueError):
         configured_int = None
     per_instance = max(1, (max(1, int(concurrency)) + instance_count - 1) // instance_count)
     effective_max = min(configured_int, per_instance) if configured_int is not None else per_instance
+    if metadata.get("engine") == "vllm":
+        native = launch_config({**metadata, "chat_template_kwargs": _effective_chat_template_kwargs(metadata)},
+                               static, effective_max)
+        return {"engine": "vllm", "concurrency": concurrency, "instance_count": instance_count,
+                "requested_parameters": requested_parameters(native),
+                "server_command_preview": command_args(native, int(metadata.get("service_port") or 25080)),
+                "deployment": deployment or None,
+                "note": "vLLM preview; runtime engine parameters are verified using /server_info?config_format=json and /v1/models. Frontend parsers/template defaults are audited in server.command.sh."}
     params: dict[str, Any] = {
         "model_path": "/model",
         "served_model_name": metadata.get("served_model_name"),
@@ -481,6 +496,7 @@ def preview_launch(metadata: dict[str, Any], candidate: dict[str, Any], concurre
         "instance_count": instance_count,
         "requested_parameters": params,
         "sglang_command_preview": flags,
+        "server_command_preview": flags,
         "deployment": deployment or None,
         "note": "Preview is computed from plan metadata. After a real attempt, server.command.sh and server.info.json are the source of truth.",
     }

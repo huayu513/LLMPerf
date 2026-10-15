@@ -10,6 +10,7 @@ from pathlib import Path
 from .artifacts import write_json_atomic
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE
 from .errors import ConfigError
+from .engines import vllm_plan_settings
 from .types import CandidateConfig, Plan, PlanTask
 
 
@@ -136,7 +137,14 @@ def create_search_plan(config, model, workload, env, result_dir):
         raise ConfigError('environment checks failed; inspect environment.json')
     groups = _groups(config, env)
     caps = env.container.get('capabilities', {})
+    engine = getattr(config, 'engine', 'sglang')
+    if engine not in {'sglang', 'vllm'}:
+        raise ConfigError(f'unsupported engine: {engine}')
     options = set(caps.get('options', []))
+    if engine == 'vllm':
+        native, vllm_backends, parsers = vllm_plan_settings(config, model, caps)
+    else:
+        native, parsers = {}, {}
     if not options:
         raise ConfigError('cannot discover SGLang launch options from the configured image')
     required = {
@@ -153,21 +161,23 @@ def create_search_plan(config, model, workload, env, result_dir):
         required.add('--quantization')
     if model.raw.get('is_moe'):
         required.update(('--moe-runner-backend', '--moe-a2a-backend'))
-    missing = sorted(required - options)
+    missing = sorted(required - options) if engine == 'sglang' else []
     if missing:
         raise ConfigError('configured image lacks required SGLang launch options: ' + ', '.join(missing))
     for parser, key in ((model.tool_call_parser, 'tool_parsers'), (model.reasoning_parser, 'reasoning_parsers')):
-        if parser and parser not in caps.get(key, []):
+        if engine == 'sglang' and parser and parser not in caps.get(key, []):
             raise ConfigError(f'configured image does not advertise parser {parser!r}; use a compatible image or model_overrides')
     requested = tuple(config.search.backends or ())
     advertised = set(caps.get('runner_backends', []))
-    if any(b not in advertised for b in requested):
+    if engine == 'sglang' and any(b not in advertised for b in requested):
         raise ConfigError('search.backends contains a backend not advertised by the configured image')
     is_moe = bool(model.raw.get('is_moe'))
     uses_mxfp4_experts = _uses_mxfp4_experts(model)
     if requested and not is_moe:
         raise ConfigError('search.backends selects MoE runners but this model is not identified as MoE')
-    if requested:
+    if engine == 'vllm':
+        backends = vllm_backends
+    elif requested:
         backends = [None if b == 'auto' else b for b in requested]
     elif is_moe:
         relevant = ['triton', 'deep_gemm', 'flashinfer_trtllm']
@@ -182,15 +192,15 @@ def create_search_plan(config, model, workload, env, result_dir):
     backends = list(dict.fromkeys(backends))
     heads = model.raw.get('num_attention_heads')
     layers = model.raw.get('num_hidden_layers')
-    dpa_supported = is_moe and {'--enable-dp-attention', '--enable-dp-lm-head'} <= options
-    dspark_supported = (model.raw.get('model_type') == 'deepseek_v4' and
+    dpa_supported = engine == 'sglang' and is_moe and {'--enable-dp-attention', '--enable-dp-lm-head'} <= options
+    dspark_supported = (engine == 'sglang' and model.raw.get('model_type') == 'deepseek_v4' and
                         {'--speculative-algorithm', '--speculative-dspark-block-size'} <= options)
     candidates = []
     for gpu_group in groups:
         for deployment in _deployment_layouts(gpu_group):
             n = deployment['gpus_per_instance']
             pp_values = [1]
-            if '--pp-size' in options and isinstance(layers, int):
+            if ('--pp-size' if engine == 'sglang' else '--pipeline-parallel-size') in options and isinstance(layers, int):
                 pp_values += [p for p in range(2, n + 1) if layers % p == 0]
             for pp in pp_values:
                 for tp in range(1, n // pp + 1):
@@ -203,6 +213,13 @@ def create_search_plan(config, model, workload, env, result_dir):
                         for dpa, actual_dp in strategies:
                             world = tp * pp if dpa else tp * actual_dp * pp
                             if world != n:
+                                continue
+                            if engine == 'vllm' and any(
+                                getattr(config, 'engine_options', {}).get(key, value) != value
+                                for key, value in (('tensor_parallel_size', tp),
+                                                   ('data_parallel_size', actual_dp),
+                                                   ('pipeline_parallel_size', pp))
+                            ):
                                 continue
                             for backend in backends:
                                 for dspark in ([False, True] if dspark_supported and pp == 1 else [False]):
@@ -228,6 +245,13 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         moe_a2a_backend='none' if is_moe else None,
                                         mem_fraction_static=0.85, max_running_requests=config.search.concurrency_max,
                                         chunked_prefill_size=8192)
+                                    if engine == 'vllm':
+                                        for key in ('dp_attention', 'dp_lm_head', 'dspark', 'moe_a2a_backend',
+                                                    'mem_fraction_static', 'max_running_requests', 'chunked_prefill_size'):
+                                            static.pop(key, None)
+                                        static.update(native, engine='vllm')
+                                        if backend is not None:
+                                            static['moe_backend'] = backend
                                     digest = fingerprint(static)
                                     ident = (
                                         f"{deployment['ascii_label']}-tp{tp}-dp{actual_dp}-pp{pp}-"
@@ -265,13 +289,13 @@ def create_search_plan(config, model, workload, env, result_dir):
     models = workload.raw.get('models', {})
     if len(models) != 1:
         raise ConfigError('input must contain one request.model alias for a single checkpoint')
-    meta = dict(workflow_version=2, profile='AUTO', engine='sglang', image=config.image,
+    meta = dict(workflow_version=2, profile='AUTO', engine=engine, image=config.image,
         smoke=bool(getattr(config, 'smoke', False)),
         model_host=str(config.model_path), jsonl_host=str(config.input_path), results_host=str(result_dir),
         index_host=str(Path(result_dir) / 'data' / 'replay_index.json'),
         benchmark_dir=str(Path(__file__).resolve().parents[1] / 'benchmarks'),
-        served_model_name=next(iter(models)), tool_call_parser=model.tool_call_parser,
-        reasoning_parser=model.reasoning_parser, chat_template_kwargs=model.chat_template_kwargs,
+        served_model_name=next(iter(models)), tool_call_parser=parsers.get('tool_call_parser', model.tool_call_parser),
+        reasoning_parser=parsers.get('reasoning_parser', model.reasoning_parser), chat_template_kwargs=model.chat_template_kwargs,
         profile_env=model.profile_env, warmup=config.warmup, request_timeout=config.request_timeout,
         ready_timeout=config.ready_timeout, expected_source_sha256=workload.sha256,
         expected_request_count=workload.raw['count'], model_fingerprint=fingerprint(asdict(model)),
@@ -283,7 +307,10 @@ def create_search_plan(config, model, workload, env, result_dir):
         candidates={c.id: asdict(c) for c in candidates},
         comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',
-        search_scope='homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP, advertised or image-resolved MoE runners, supported DSpark; runtime validation required')
+        search_scope=('homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP; '
+                      'vLLM-native scheduler and explicit MoE options; runtime validation required'
+                      if engine == 'vllm' else
+                      'homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP, advertised or image-resolved MoE runners, supported DSpark; runtime validation required'))
     if model.raw.get('provenance', {}).get('quantization') == 'model_overrides.quantization':
         meta['quantization'] = model.quantization
     return Plan(Path(result_dir).name, candidates=tuple(candidates), metadata=_jsonable(meta))

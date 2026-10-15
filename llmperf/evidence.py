@@ -33,8 +33,11 @@ def candidate_summary(candidate: dict) -> dict:
     return {"candidate_id": candidate["id"], "config_hash": candidate["config_hash"],
             "gpu_indexes": static.get("gpu_indexes", candidate.get("gpu_indexes", [])),
             "params": {key: static.get(key) for key in
-                       ("tp", "dp", "pp", "dp_attention", "backend", "dspark",
-                        "mem_fraction_static", "chunked_prefill_size", "max_running_requests")},
+                       ("engine", "tp", "dp", "pp", "dp_attention", "backend", "dspark",
+                        "mem_fraction_static", "chunked_prefill_size", "max_running_requests",
+                        "gpu_memory_utilization", "max_num_seqs", "max_num_batched_tokens",
+                        "max_model_len", "enable_expert_parallel", "all2all_backend", "moe_backend",
+                        "speculative_config") if key in static},
             "deployment": {key: deployment.get(key) for key in
                            ("label", "instance_count", "gpus_per_instance", "total_gpu_count")}}
 
