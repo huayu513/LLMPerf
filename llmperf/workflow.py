@@ -67,7 +67,7 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     if stop_after == 'prepare':
         return {'command': stop_after, 'status': 'PASS', 'result_dir': str(root), 'requests': index['count']}
     plan = create_search_plan(config, model, workload, env, root)
-    if model.raw.get('is_moe'):
+    if config.engine == 'sglang' and model.raw.get('is_moe'):
         print(json.dumps({'event': 'backend_resolution_start',
                           'candidates': len(plan.candidates)}), flush=True)
         image = env.image.to_dict() if hasattr(env.image, 'to_dict') else dict(env.image)

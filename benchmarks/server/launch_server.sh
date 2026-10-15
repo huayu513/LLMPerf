@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+if [[ "${S1_ENGINE:-sglang}" == "vllm" ]]; then
+  exec "${S1_PYTHON_BIN:-python3}" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vllm_server.py" "$@"
+fi
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

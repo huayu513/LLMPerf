@@ -165,6 +165,7 @@ def _calibrate_scene(root: Path, config, model, scene: dict) -> dict:
                  "--output", "/run/scene/calibration-result.json"),
         network_mode=config.docker.network_mode, shm_size=config.docker.shm_size,
         ipc=config.docker.ipc,
+        entrypoint="" if getattr(config, "engine", "sglang") == "vllm" else None,
     )
     try:
         run = DockerRuntime().run(spec, data_dir / "calibration.log")
@@ -221,7 +222,7 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
     if index["jsonl_sha256"] != workload.sha256:
         raise ConfigError("workload changed during preparation")
     plan = create_search_plan(effective_config, model, workload, env, root)
-    if model.raw.get("is_moe"):
+    if effective_config.engine == "sglang" and model.raw.get("is_moe"):
         image = env.image.to_dict() if hasattr(env.image, "to_dict") else dict(env.image)
         if image.get("image_id"):
             resolutions = resolve_in_image(plan, effective_config, root)

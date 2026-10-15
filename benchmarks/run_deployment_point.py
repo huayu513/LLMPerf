@@ -15,6 +15,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+if __package__:
+    from .server.vllm_config import server_parameters
+else:
+    from server.vllm_config import server_parameters
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -110,8 +114,9 @@ def load_deployment() -> dict[str, Any]:
     if not isinstance(deployment, dict):
         die("S1_DEPLOYMENT must be a JSON object")
     instances = deployment.get("instances")
-    if not isinstance(instances, list) or len(instances) < 2:
-        die("S1_DEPLOYMENT.instances must contain at least two instances")
+    minimum = 1 if os.environ.get("S1_ENGINE") == "vllm" else 2
+    if not isinstance(instances, list) or len(instances) < minimum:
+        die(f"S1_DEPLOYMENT.instances must contain at least {minimum} instances")
     return deployment
 
 
@@ -215,7 +220,7 @@ def values_match(key: str, expected: Any, actual: Any) -> bool:
 
 
 def compare_parameters(requested: dict[str, Any], server_info: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
-    leaves = server_info_leaves(server_info)
+    leaves = server_parameters(server_info) if "vllm_config" in server_info else server_info_leaves(server_info)
     unsupported: list[str] = []
     mismatched: list[str] = []
     checks: dict[str, Any] = {}
@@ -266,6 +271,7 @@ def instance_env(base: dict[str, str], results_root: Path, instance: dict[str, A
 
 def main() -> int:
     args = parse_args()
+    engine = os.environ.get("S1_ENGINE", "sglang")
     deployment = load_deployment()
     results_root = Path(os.environ.get("S1_RESULTS_ROOT", "/run/results"))
     results_root.mkdir(parents=True, exist_ok=True)
@@ -307,8 +313,8 @@ def main() -> int:
         if args.dry_run:
             for offset, instance in enumerate(instances):
                 env = instance_env(base_env, results_root, instance, service_ports[offset])
-                command = [str(LAUNCHER), "dry-run", args.profile]
-                print(" ".join(command), "CUDA_VISIBLE_DEVICES=" + env["CUDA_VISIBLE_DEVICES"])
+                command = ["bash", str(LAUNCHER), "dry-run", args.profile]
+                subprocess.run(command, env=env, check=True)
             final_exit = 0
             final_state = "complete"
             return final_exit
@@ -337,11 +343,11 @@ def main() -> int:
                     check=False,
                 )
                 if status.returncode != 0:
-                    die(f"SGLang instance {instance.get('id')} exited before becoming ready; inspect {log_file}")
+                    die(f"{engine} instance {instance.get('id')} exited before becoming ready; inspect {log_file}")
                 if startup_log_has_failure(log_file):
-                    die(f"SGLang instance {instance.get('id')} logged a startup exception before becoming ready; inspect {log_file}")
+                    die(f"{engine} instance {instance.get('id')} logged a startup exception before becoming ready; inspect {log_file}")
                 if time.monotonic() >= deadline:
-                    die(f"SGLang instance {instance.get('id')} did not become ready within {args.ready_timeout}s")
+                    die(f"{engine} instance {instance.get('id')} did not become ready within {args.ready_timeout}s")
                 time.sleep(2)
             print(f"server ready: {base_urls[offset]}", flush=True)
 
@@ -355,7 +361,12 @@ def main() -> int:
             state_dir = Path(env["S1_SERVER_STATE_DIR"])
             instance_dir = results_root / "instances" / str(instance["id"])
             requested = json.loads((state_dir / "server.requested.json").read_text(encoding="utf-8"))
-            captured, info = http_json(base_urls[offset].rstrip("/") + "/get_server_info")
+            info_path = "/server_info?config_format=json" if engine == "vllm" else "/get_server_info"
+            captured, info = http_json(base_urls[offset].rstrip("/") + info_path)
+            if engine == "vllm":
+                models_ok, models = http_json(base_urls[offset].rstrip("/") + "/v1/models")
+                info["models"] = models
+                captured = captured and models_ok and isinstance(info.get("vllm_config"), dict)
             atomic_json(instance_dir / "server.info.json", info)
             for name in ("server.command.sh", "server.meta", "server.requested.json"):
                 source = state_dir / name
