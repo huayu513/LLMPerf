@@ -97,6 +97,8 @@ Adaptive 的 `plan.json` 不保存令牌。运行期优先使用 `advisor.api_ke
 
 `configs/experiment.sglang.json` 保留现有 SGLang 配置，并显式设置 `engine: "sglang"`；`configs/experiment.vllm.json` 提供 vLLM 示例。按需修改后，可完整复制到 Web 默认使用的 `configs/experiment.json`，也可在 CLI 中通过 `--config` 直接指定。SGLang 配置中的既有镜像不代表已验证支持 A800 上的 DeepSeek-V4-Flash-0731 原生权重。
 
+vLLM 示例已包含 `advisor`，沿用现有顾问端点、模型及思考和回答预算；令牌通过 `api_key_env: "API_KEY"` 读取，不在示例中重复保存。启动 CLI 或 Web 服务前设置 `export API_KEY='接口令牌'`，令牌不带 `Bearer ` 前缀。使用 `tune-plan → run` 或 Web 智能调优入口调用顾问；普通 `auto` 仍不调用顾问。
+
 ### vLLM-backport：A800 与 DeepSeek-V4-Flash-0731 原生权重
 
 新增配置示例 `configs/experiment.vllm.json`；现有 `configs/experiment.json` 不变。优先使用提供 SM80 支持的 vLLM-backport 镜像，而不是假设普通上游 vLLM 镜像支持 A800。backport 的 `latest-sm80` 是 SM80 标签，裸 `latest` 不是。压测应固定已验证的版本和实际 digest：

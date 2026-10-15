@@ -19,5 +19,19 @@
     "start_concurrency": 8,
     "concurrency_max": 64,
     "max_trials": 64
+  },
+  "advisor": {
+    "base_url": "http://10.64.39.63:54321/v1/chat/completions",
+    "model": "DeepSeek-V4-Flash-Local",
+    "api_key_env": "API_KEY",
+    "timeout_seconds": 2000,
+    "thinking": true,
+    "reasoning_effort": "max",
+    "task_max_tokens": {
+      "scene": 100000,
+      "candidates": 100000,
+      "explain": 100000,
+      "next_experiments": 100000
+    }
   }
 }
