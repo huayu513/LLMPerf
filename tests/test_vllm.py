@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from benchmarks.run_deployment_point import compare_parameters
 from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters, server_parameters
-from llmperf.adapters import ReplayAdapter, _compare_server_parameters, read_attempt
+from llmperf.adapters import ReplayAdapter, _compare_server_parameters, _effective_chat_template_kwargs, read_attempt
 from llmperf.capabilities import EnvironmentSnapshot, GPUInfo
 from llmperf.advisor import LocalAdvisor
 from llmperf.configuration import validate_advisor
@@ -131,6 +131,27 @@ class VLLMTests(unittest.TestCase):
         self.config.engine_options = {"max_model_len": 131072}
         with self.assertRaisesRegex(ConfigError, "max-model-len"):
             create_search_plan(self.config, self.model, self.workload, snapshot, self.root / "results")
+
+    def test_native_default_template_enables_max_thinking(self):
+        plan = self.plan()
+        expected = {"enable_thinking": True, "thinking": True, "reasoning_effort": "max"}
+        self.assertEqual(self.model.chat_template_kwargs, expected)
+        self.assertEqual(plan.metadata["chat_template_kwargs"], expected)
+        native = launch_config(plan.metadata, plan.candidates[0].static_config, 4)
+        command = command_args(native, 25080)
+        self.assertEqual(json.loads(command[command.index("--default-chat-template-kwargs") + 1]), expected)
+
+    def test_explicit_and_frozen_templates_are_not_upgraded_to_max(self):
+        for template in ({}, {"thinking": False}, {"thinking": True, "reasoning_effort": "high"}):
+            with self.subTest(template=template):
+                metadata = {"chat_template_kwargs": template, "model_snapshot": {"raw": {
+                    "provenance": {"chat_template_kwargs": "model_overrides.chat_template_kwargs"}}}}
+                self.assertEqual(_effective_chat_template_kwargs(metadata), template)
+                native = launch_config({**metadata, "served_model_name": "model"}, {}, 4)
+                command = command_args(native, 25080)
+                self.assertEqual(json.loads(command[command.index("--default-chat-template-kwargs") + 1]), template)
+        frozen = {"thinking": True, "reasoning_effort": "high"}
+        self.assertEqual(_effective_chat_template_kwargs({"chat_template_kwargs": frozen}), frozen)
 
     def test_replay_without_scene_limit_preserves_each_original_request(self):
         source = (ROOT / "benchmarks/replay/replay_jsonl_sglang.py").read_text()

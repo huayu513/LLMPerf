@@ -9,7 +9,7 @@ TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-deepseekv4}"
 REASONING_PARSER="${REASONING_PARSER:-deepseek-v4}"
 DEFAULT_CHAT_TEMPLATE_KWARGS="${DEFAULT_CHAT_TEMPLATE_KWARGS:-}"
 if [[ -z "$DEFAULT_CHAT_TEMPLATE_KWARGS" ]]; then
-  DEFAULT_CHAT_TEMPLATE_KWARGS='{"reasoning_effort":"high","thinking":true,"enable_thinking":true}'
+  DEFAULT_CHAT_TEMPLATE_KWARGS='{"reasoning_effort":"max","thinking":true,"enable_thinking":true}'
 fi
 MOE_RUNNER_BACKEND="${MOE_RUNNER_BACKEND:-flashinfer_mxfp4}"
 MOE_A2A_BACKEND="${MOE_A2A_BACKEND:-none}"

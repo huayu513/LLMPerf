@@ -28,7 +28,7 @@ _OVERRIDE_KEYS = {
 # server and any component that needs to render a chat template.
 _DEFAULT_CHAT_TEMPLATE_KWARGS = {
     "enable_thinking": True,
-    "reasoning_effort": "high",
+    "reasoning_effort": "max",
     "thinking": True,
 }
 _QWEN2_TYPES = {"qwen", "qwen2", "qwen2_moe"}
@@ -403,7 +403,7 @@ def discover_model(
 
     if "chat_template_kwargs" in override:
         # An explicit model override remains authoritative for model-specific
-        # templates, while the ordinary automatic path gets high thinking by
+        # templates, while the ordinary automatic path gets max thinking by
         # default.  The captured requests themselves are never rewritten.
         chat_template_kwargs = _mapping(
             override["chat_template_kwargs"], "chat_template_kwargs"
@@ -413,7 +413,7 @@ def discover_model(
     provenance["chat_template_kwargs"] = (
         "model_overrides.chat_template_kwargs"
         if "chat_template_kwargs" in override
-        else "automatic high-thinking default"
+        else "automatic max-thinking default"
     )
     profile_env = _mapping(override.get("profile_env", {}), "profile_env")
     if any(not isinstance(value, str) for value in profile_env.values()):

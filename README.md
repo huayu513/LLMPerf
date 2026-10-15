@@ -171,7 +171,7 @@ python3 benchctl.py auto --config configs/experiment.json
 
 每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。启动前会检查挂载的 `.sh`、`.py` 和 `.env` 文件；如果上传过程把 LF 转成了 CRLF，会在本次 run 的结果目录下生成 LF 副本并使用它，不修改原始 LLMPerf 目录。
 
-自动方案的服务设置默认开启 high thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=high`；只有显式的 `model_overrides.chat_template_kwargs` 会覆盖这个默认。原始请求对象仍原样回放，采样参数和输出长度不参与吞吐调优。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
+自动方案的被测服务默认开启 max thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=max`，SGLang 与 vLLM 使用相同默认值；`model_overrides.chat_template_kwargs` 可显式覆盖，包括关闭思考。镜像和模型模板需支持 `max`，实际是否生效应在目标服务验证，不会静默降为 `high`。原始请求对象仍原样回放，请求自身的模板参数按引擎合并规则处理，采样参数和输出长度不参与吞吐调优。这些是被测服务设置，与 `advisor` 的思考和回答预算独立。旧计划中已冻结的 `high` 或显式模板配置保持不变，要使用新默认值需重新生成计划。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
 
 如果候选服务在启动阶段因为参数不支持、参数不匹配或其他配置错误而失败，当前 candidate 会记录为 `FAILED`；只有服务已经就绪、原生参数证据明确指出所请求的显式 MoE runner backend 不受支持时，后续使用同一 backend 的候选才会记录为 `SKIPPED`。未就绪、缺少证据、OOM、模型加载失败和拓扑相关参数不匹配只影响当前 candidate。引擎自动选择的 `auto` 没有可确认的 backend，不会据此误跳过其他候选。回放阶段的请求失败或 OOM 只停止当前 candidate 的并发分支。失败候选和 backend 跳过原因会写入 `search-state.json`、`results-index.json` 和 `best.json`。需要复查时可在前端对单个 candidate 使用“单独重跑这个参数”，该入口不受自动搜索的 backend 跳过状态影响。
 
@@ -328,7 +328,7 @@ python3 -B -m unittest discover -s tests -v
 PYTHONPATH=.:tests python3 -B -m unittest discover -s verification -v
 ```
 
-本次适配涉及的 `tests/test_configuration.py`、`tests/test_capabilities.py`、`tests/test_docker_runtime.py` 和 `tests/test_vllm.py` 已纳入 Git，可在新克隆中运行。其他历史 `tests/` 和整个 `verification/` 仍为忽略跟踪的本地自测材料，完整回归命令仅适用于保留这些目录的环境。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
+vLLM、配置校验、环境探测、Docker、模型识别、回放适配、服务默认值及 Web 预览的相关 `tests/` 已纳入 Git，可在新克隆中运行。其他历史 `tests/` 和整个 `verification/` 仍为忽略跟踪的本地自测材料，完整回归命令仅适用于保留这些目录的环境。`verification/` 覆盖自适应配置、候选池、证据、调度、恢复、预算、容器超时与 Web 等回归场景，均不调用真实顾问或启动 GPU 压测。`tests/` 中 macOS 的环境探测自测依赖 Linux `/dev/shm`，该项应在目标 Linux 环境验证。
 
 复制后的目录可以直接运行 `python3 benchctl.py --help`。实际硬件、checkpoint 和镜像的兼容性由目标机器上的环境探测、探索样本和最终完整输入复跑确认。
 
