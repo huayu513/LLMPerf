@@ -118,12 +118,14 @@ python3 benchctl.py auto --config configs/experiment.vllm.json
 - `gpu_memory_utilization`：默认 0.9；与 SGLang 的静态显存占比不是严格等价概念。
 - `max_num_seqs`：默认 `search.concurrency_max`，每个 trial 按单实例分到的并发收紧；不是客户端总并发的同义词。
 - `max_num_batched_tokens`：默认 4096，表示迭代 token 预算，不等同于 SGLang 的 chunked-prefill-size。
-- `max_model_len`：DeepSeek-V4 默认 32768，其他模型不强制设置；更长业务请求需要显式提高，并在目标机器验证显存。
+- `max_model_len`：默认不设置，不传 `--max-model-len`，由引擎读取模型配置；只有显式配置时才覆盖。不会自动改为 `auto`、固定 32K 或按请求长度估算。默认上下文导致显存不足时明确报错，不缩短业务请求。
 - `enforce_eager`、`enable_expert_parallel`：默认关闭。EP 和通信策略仅按显式配置启用，不映射 SGLang DP Attention。
 - `moe_backend`、`all2all_backend`：可选原生参数，要求镜像广告相应 CLI。`search.backends` 在 vLLM 下表示原生 MoE backend，与 `moe_backend` 不能同时配置；默认交给引擎 AUTO，不调用 SGLang 的解析或去重流程。
 - `speculative_config`：默认不启用；可显式配置 `{"method":"deepseek_mtp","num_speculative_tokens":5}`，需对应 backport 版本支持。不把 SGLang DSpark 直接映射成 vLLM 投机解码。
 
 DeepSeek-V4 的自动工具/推理 parser 映射为 vLLM 的 `deepseek_v4`。显式 `model_overrides` 的 parser 名称优先。镜像必须支持默认聊天模板 kwargs，原始回放请求不做额外改写；请求自身的模板参数仍由服务端合并处理。其他模型若 parser 不兼容，需指定该镜像支持的原生 parser。
+
+与 SGLang 一样，Strict 和智能调优默认使用原始请求：不要求 `max_input_tokens`、`max_output_tokens`，不截断或补齐输入；请求自带的 `max_tokens` / `max_completion_tokens` 原样保留，没有则不添加。显式场景输出上限仍按既有规则收紧请求。旧计划保留冻结的上下文及输出限制，修改配置后应重新生成计划。
 
 运行镜像需要 Python、PyTorch/CUDA/NCCL、aiohttp、bash 和可用的 `vllm serve --help=all`。探测、校准和压测均显式覆盖镜像 ENTRYPOINT。单实例和多实例共用控制器，保留原始 JSONL、流式 usage、吞吐、P95 和失败判定。智能调优与 Web 命令预览使用 vLLM 原生参数目录，不生成 SGLang 的 DPA/DSpark 候选。
 

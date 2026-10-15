@@ -49,7 +49,7 @@ def environment(count=2):
 
 def native_info(config):
     return {"vllm_config": {
-        "model_config": {"model": "/model", "max_model_len": config.get("max_model_len", 32768),
+        "model_config": {"model": "/model", "max_model_len": config.get("max_model_len", 1048576),
                          "enforce_eager": config.get("enforce_eager", False)},
         "parallel_config": {"tensor_parallel_size": config["tp"], "data_parallel_size": config["dp"],
                             "pipeline_parallel_size": config["pp"], "enable_expert_parallel": False},
@@ -104,7 +104,43 @@ class VLLMTests(unittest.TestCase):
                              candidate.static_config["deployment"]["gpus_per_instance"])
             self.assertNotIn("mem_fraction_static", candidate.static_config)
             self.assertNotIn("chunked_prefill_size", candidate.static_config)
-            self.assertEqual(candidate.static_config["max_model_len"], 32768)
+            self.assertNotIn("max_model_len", candidate.static_config)
+            native = launch_config(plan.metadata, candidate.static_config, 4)
+            self.assertNotIn("--max-model-len", command_args(native, 25080))
+            self.assertNotIn("max_model_len", requested_parameters(native))
+            self.assertEqual(server_parameters(native_info(native))["max_model_len"], 1048576)
+
+    def test_explicit_context_length_is_preserved(self):
+        self.config.engine_options = {"max_model_len": 131072}
+        plan = self.plan()
+        for candidate in plan.candidates:
+            self.assertEqual(candidate.static_config["max_model_len"], 131072)
+            native = launch_config(plan.metadata, candidate.static_config, 4)
+            command = command_args(native, 25080)
+            self.assertEqual(command[command.index("--max-model-len") + 1], "131072")
+            self.assertEqual(requested_parameters(native)["max_model_len"], 131072)
+
+    def test_default_context_does_not_require_an_explicit_length_option(self):
+        snapshot = environment()
+        snapshot.container["capabilities"]["options"].remove("--max-model-len")
+        plan = create_search_plan(self.config, self.model, self.workload, snapshot, self.root / "results")
+        self.assertTrue(plan.candidates)
+        self.config.engine_options = {"max_model_len": 131072}
+        with self.assertRaisesRegex(ConfigError, "max-model-len"):
+            create_search_plan(self.config, self.model, self.workload, snapshot, self.root / "results")
+
+    def test_replay_without_scene_limit_preserves_each_original_request(self):
+        source = (ROOT / "benchmarks/replay/replay_jsonl_sglang.py").read_text()
+        node = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "apply_output_token_limit")
+        scope = {"Any": object}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "replay-limits", "exec"), scope)
+        for limits in ({}, {"max_tokens": 2048}, {"max_completion_tokens": 4096}):
+            request = {"messages": [{"role": "user", "content": "原始业务请求"}],
+                       "chat_template_kwargs": {"thinking": False}, **limits}
+            original = copy.deepcopy(request)
+            self.assertIs(scope["apply_output_token_limit"](request, None), request)
+            self.assertEqual(request, original)
 
     def test_reasoning_stream_fields_both_count_toward_first_token_activity(self):
         source = (ROOT / "benchmarks/replay/replay_jsonl_sglang.py").read_text()
