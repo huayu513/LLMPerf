@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .adapters import ReplayAdapter, read_attempt
-from .advisor import LocalAdvisor, runtime_advisor_spec
+from .advisor import LocalAdvisor, ask_advisor, runtime_advisor_spec
 from .adaptive import AdaptiveScheduler, build_candidate_pool
 from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
@@ -309,12 +309,27 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
     baseline = catalog["base_candidates"][0]
     add(CandidateConfig(**{**baseline, "gpu_indexes": tuple(baseline["gpu_indexes"]),
                            "reasons": tuple(baseline.get("reasons", ())) }))
+
+    def validate_candidates(reply):
+        rows = reply.get("candidates")
+        if not isinstance(rows, list) or len(rows) > 5:
+            raise ValueError("advisor must return at most 5 candidates")
+        for row in rows:
+            try:
+                _from_suggestion(row, catalog)
+                return
+            except (ValueError, TypeError):
+                continue
+        if rows:
+            raise ValueError("no_valid_planning_candidates")
+
+    client = advisor or LocalAdvisor(config.advisor)
     try:
-        reply = (advisor or LocalAdvisor(config.advisor)).ask("candidates", {
+        reply = ask_advisor(client, "candidates", {
             "engine": config.engine, "scenario": scene, "catalog": _visible_catalog(catalog, 0),
             "tested": [], "remaining_trials": exploration_capacity - 1,
             "request_count": template.metadata["expected_request_count"],
-        })
+        }, validate_candidates)
         rows = reply.get("candidates")
         if not isinstance(rows, list) or len(rows) > 5:
             raise ValueError("advisor must return at most 5 candidates")
@@ -324,11 +339,14 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
                 before = len(selected)
                 add(_from_suggestion(row, catalog))
                 accepted += len(selected) - before
-            except ValueError as exc:
+            except (ValueError, TypeError) as exc:
                 decisions.append({"reason": "advisor_candidate_rejected", "detail": str(exc)})
         advisor_calls.append({"task": "candidates", "status": "PASS", "accepted": accepted})
     except (ConfigError, ValueError) as exc:
         advisor_calls.append({"task": "candidates", "status": "FALLBACK", "reason": str(exc)})
+    finally:
+        if isinstance(client, LocalAdvisor) and advisor_calls:
+            advisor_calls[-1]["request_attempts"] = client.last_call
 
     if adaptive:
         bases = [CandidateConfig(**{**row, "gpu_indexes": tuple(row["gpu_indexes"]),

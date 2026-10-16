@@ -42,6 +42,10 @@ python3 benchctl.py scenario --config configs/experiment.json \
 python3 benchctl.py tune-plan --config configs/experiment.json
 ```
 
+顾问采用错峰并发请求：本轮第 0、500、1000、1500 秒各发送一次相同任务，最多四次；旧请求继续等待，首个完整且通过任务校验的结果胜出。HTTP 错误、非法 JSON 和无效场景/候选不能抢占有效结果。收到有效结果后停止追加、尽力关闭其余连接，晚到结果不再应用；服务端不一定随连接关闭停止生成，因此最多可能产生四份推理负载。整轮按单调时钟计时，最多 2000 秒，较短的配置超时或剩余探索预算会缩短窗口，不会为凑齐四次而延长。若所有可发送请求已明确失败，则提前记录失败；仅到截止时间仍未完成时记录超时。运行期无有效结果仍按原逻辑降级规则选点，不将未运行候选判为失败。
+
+`search.adaptive.max_advisor_calls` 继续限制反馈顾问轮次，一轮可能包含最多四次实际 HTTP 请求，并非只消耗一次模型推理。标准错误日志输出 `advisor_request_started`、`advisor_request_finished`、`advisor_call_finished`，记录发送时间、各次状态、实际请求数和采用序号，不输出认证或业务请求正文。规划记录和反馈决策的 `request_attempts` 保存同样的审计信息；Web 反馈决策显示实际请求次数和采用第几次返回。已接受的旧决策在 Resume 时仍复用，不会重新请求。
+
 模型只提取明确指定的字段；省略或“其他默认”的字段由平台确定，不追问缺项，只追问明确要求中的歧义。默认输入保留原始 `messages`，不截断、不填充；默认输出保留原请求的 `max_tokens` / `max_completion_tokens`，原请求没有上限就不新增，沿用服务端默认值和上下文限制。场景快照中 `max_input_tokens` / `max_output_tokens: null` 表示不添加场景上限。默认目标为 `throughput`；默认并发优先使用 `search.start_concurrency`，否则按配置 GPU 数每卡 8 并发估算（未指定 GPU 时按一张卡保守估算），且不超过 `search.concurrency_max`。缺少 `input_path` 会报错，不静默切换合成负载。
 
 明确指定输出上限时，仅在发送请求时收紧原有生成限制；原上限更小时保留原值，没有上限时增加 `max_tokens`。源 JSONL 不修改，结果记录原始和实际发送请求的哈希及输出限制。明确指定输入上限只核验实际 usage，不自动截断或补齐。实际输入/输出超过指定上限或 usage 缺失的试验不能参与选优。

@@ -1763,7 +1763,8 @@ def adaptive_decisions(run_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(document, dict):
             continue
         row = {key: document.get(key) for key in
-               ("id", "source", "status", "reason", "diagnosis", "selected", "validation_rejections")}
+               ("id", "source", "status", "reason", "diagnosis", "selected", "validation_rejections",
+                "request_attempts")}
         row["manifest"] = entry.get("manifest")
         response = document.get("response")
         recommendations = response.get("next_candidates", []) if isinstance(response, dict) else []

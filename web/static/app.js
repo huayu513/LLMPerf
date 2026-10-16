@@ -334,7 +334,7 @@ function renderSummary() {
     ["计划探索上限", planning.exploration_capacity],
     ["复验预留次数", planning.reserved_final_trials],
     ["顾问规划结果", planning.advisor_calls],
-    ["反馈顾问调用", strategy === "adaptive" ? String(adaptiveState.advisor_calls || 0) + " / " + String(policy.max_advisor_calls) : "执行阶段不调用"],
+    ["反馈顾问轮次", strategy === "adaptive" ? String(adaptiveState.advisor_calls || 0) + " / " + String(policy.max_advisor_calls) : "执行阶段不调用"],
     ["待执行反馈候选", adaptiveState.pending],
     ["Trial 数", summary.row_count],
     ["当前阶段", currentStage(state.trials, bestDoc)],
@@ -367,12 +367,15 @@ function renderAdaptiveDecisions(rows, strategy) {
   var html = '<h3>反馈决策</h3><div class="table-wrap"><table><thead><tr><th>轮次</th><th>来源 / 状态</th><th>依据 / 降级原因</th><th>下一批候选</th></tr></thead><tbody>';
   rows.forEach(function(row) {
     var diagnosis = row.diagnosis || {};
+    var requests = row.request_attempts || {};
+    var requestInfo = requests.request_count != null ? "实际请求 " + requests.request_count + " 次；"
+      + (requests.winner != null ? "采用第 " + requests.winner + " 次返回" : requests.status || "") : "";
     var explanation = diagnosis.hypothesis || row.reason || "";
     var recommendations = (row.recommendations || []).map(function(item) {
       return item.candidate_id + ": " + (item.reason || "") + " " + (item.expected_effect || "");
     }).join("; ");
     html += '<tr><td>' + escapeHtml(row.id) + '</td><td>' + escapeHtml(row.source) + ' / ' + escapeHtml(row.status) +
-      '</td><td>' + escapeHtml(explanation) + '<div class="small">' + escapeHtml(recommendations) +
+      '<div class="small">' + escapeHtml(requestInfo) + '</div></td><td>' + escapeHtml(explanation) + '<div class="small">' + escapeHtml(recommendations) +
       '</div><div class="small">' + escapeHtml((row.validation_rejections || []).join(", ")) +
       '</div></td><td class="code">' + escapeHtml((row.selected || []).join(", ")) + '</td></tr>';
   });
