@@ -2,15 +2,25 @@
 from __future__ import annotations
 
 import json
+import math
 import os
-import urllib.error
+import queue
+import sys
+import threading
+import time
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .artifacts import sha256_file, write_json_atomic
-from .configuration import load_config, resolve_scenario
+from .configuration import ADVISOR_TIMEOUT_SECONDS, load_config, resolve_scenario
 from .errors import ConfigError
+from .evidence import redact
+
+
+ADVISOR_RETRY_INTERVAL_SECONDS = 500
+ADVISOR_MAX_REQUESTS = 4
 
 
 def _json_object(content: Any) -> dict[str, Any]:
@@ -30,8 +40,10 @@ def _json_object(content: Any) -> dict[str, Any]:
 class LocalAdvisor:
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
+        self.last_call: dict[str, Any] = {}
 
-    def ask(self, task: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def ask(self, task: str, payload: dict[str, Any], *,
+            validate: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         base = self.settings["base_url"]
         url = base if base.endswith("/chat/completions") else base + (
             "/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
@@ -107,14 +119,134 @@ class LocalAdvisor:
                 if not key:
                     raise ConfigError(f"advisor API key environment variable is missing: {key_env}")
                 headers["Authorization"] = f"Bearer {key}"
-        request = urllib.request.Request(url, body, headers=headers, method="POST")
+        secrets = (headers.get("Authorization", ""),
+                   headers.get("Authorization", "").removeprefix("Bearer "))
+        return self._race_requests(task, url, body, headers, validate, secrets)
+
+    def _race_requests(self, task, url, body, headers, validate, secrets):
+        timeout = min(float(self.settings["timeout_seconds"]), ADVISOR_TIMEOUT_SECONDS)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ConfigError("advisor timeout must be positive and finite")
+        started = time.monotonic()
+        deadline = started + timeout
+        schedule = [started + index * ADVISOR_RETRY_INTERVAL_SECONDS
+                    for index in range(ADVISOR_MAX_REQUESTS)
+                    if started + index * ADVISOR_RETRY_INTERVAL_SECONDS < deadline]
+        replies = queue.Queue()
+        stopped = threading.Event()
+        response_lock = threading.Lock()
+        responses = {}
+        active = set()
+        trace = {"task": task, "timeout_seconds": timeout,
+                 "retry_interval_seconds": ADVISOR_RETRY_INTERVAL_SECONDS,
+                 "max_requests": ADVISOR_MAX_REQUESTS, "status": "PENDING",
+                 "winner": None, "attempts": []}
+        self.last_call = trace
+        attempts = trace["attempts"]
+
+        def emit(event, **values):
+            print(json.dumps({"event": event, "task": task, **values}, ensure_ascii=False),
+                  file=sys.stderr, flush=True)
+
+        def request_once(number):
+            try:
+                remaining = deadline - time.monotonic()
+                if stopped.is_set() or remaining <= 0:
+                    return
+                request = urllib.request.Request(url, body, headers=dict(headers), method="POST")
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(request, timeout=remaining) as response:
+                    with response_lock:
+                        responses[number] = response
+                    if stopped.is_set():
+                        return
+                    document = json.load(response)
+                reply = _json_object(document["choices"][0]["message"]["content"])
+                outcome = (number, time.monotonic(), reply, None)
+            except Exception as exc:
+                outcome = (number, time.monotonic(), None, exc)
+            finally:
+                with response_lock:
+                    responses.pop(number, None)
+            if not stopped.is_set():
+                replies.put(outcome)
+
+        def close_response(response):
+            try:
+                response.close()
+            except Exception:
+                pass
+
         try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(request, timeout=float(self.settings["timeout_seconds"])) as response:
-                document = json.load(response)
-            return _json_object(document["choices"][0]["message"]["content"])
-        except (OSError, urllib.error.URLError, ValueError, KeyError, IndexError, TypeError) as exc:
-            raise ConfigError(f"local advisor {task} call failed: {exc}") from exc
+            while True:
+                now = time.monotonic()
+                if now >= deadline:
+                    trace["status"] = "TIMEOUT"
+                    raise ConfigError(f"local advisor {task} call timed out after {timeout:g}s "
+                                      f"({len(attempts)} requests)")
+                try:
+                    outcome = replies.get_nowait()
+                except queue.Empty:
+                    if len(attempts) < len(schedule) and now >= schedule[len(attempts)]:
+                        number = len(attempts) + 1
+                        attempt = {"request": number, "sent_time_unix": time.time(),
+                                   "sent_elapsed_seconds": now - started, "status": "PENDING"}
+                        attempts.append(attempt)
+                        active.add(number)
+                        emit("advisor_request_started", **attempt)
+                        threading.Thread(target=request_once, args=(number,), daemon=True).start()
+                        continue
+                    if not active and len(attempts) == len(schedule):
+                        trace["status"] = "FAILED"
+                        raise ConfigError(f"local advisor {task} call failed: all {len(attempts)} "
+                                          f"requests failed; {attempts[-1].get('error', '')}")
+                    wake_at = min(deadline, schedule[len(attempts)] if len(attempts) < len(schedule)
+                                  else deadline)
+                    try:
+                        outcome = replies.get(timeout=max(0, wake_at - time.monotonic()))
+                    except queue.Empty:
+                        continue
+                number, completed, reply, error = outcome
+                active.discard(number)
+                attempt = attempts[number - 1]
+                if completed >= deadline or time.monotonic() >= deadline:
+                    continue
+                if error is None and validate is not None:
+                    try:
+                        validate(reply)
+                    except (ValueError, TypeError, KeyError, IndexError) as exc:
+                        error = exc
+                if time.monotonic() >= deadline:
+                    continue
+                attempt["completed_elapsed_seconds"] = time.monotonic() - started
+                if error is not None:
+                    attempt.update(status="FAILED", error=redact(str(error), secrets),
+                                   error_type=type(error).__name__)
+                    emit("advisor_request_finished", **attempt)
+                    continue
+                attempt["status"] = "PASS"
+                trace.update(status="PASS", winner=number)
+                emit("advisor_request_finished", **attempt)
+                return reply
+        finally:
+            stopped.set()
+            for attempt in attempts:
+                if attempt["status"] == "PENDING":
+                    attempt["status"] = "TIMEOUT" if trace["status"] == "TIMEOUT" else "CANCELLED"
+            if trace["status"] == "PENDING":
+                trace["status"] = "CANCELLED"
+            trace.update(request_count=len(attempts), elapsed_seconds=time.monotonic() - started)
+            with response_lock:
+                pending_responses = list(responses.values())
+            for response in pending_responses:
+                threading.Thread(target=close_response, args=(response,), daemon=True).start()
+            emit("advisor_call_finished", **{key: value for key, value in trace.items() if key != "task"})
+
+
+def ask_advisor(client, task, payload, validate):
+    if isinstance(client, LocalAdvisor):
+        return client.ask(task, payload, validate=validate)
+    return client.ask(task, payload)
 
 
 def extract_and_save_scenario(config_path: str | Path, description: str,
@@ -126,12 +258,22 @@ def extract_and_save_scenario(config_path: str | Path, description: str,
     if config.advisor is None:
         raise ConfigError("advisor settings are required to parse a natural-language scene")
     before = sha256_file(path)
-    reply = (advisor or LocalAdvisor(config.advisor)).ask("scene", {"description": description.strip()})
+    def validate(reply):
+        if "question" in reply:
+            question = reply["question"]
+            if not isinstance(question, str) or not question.strip():
+                raise ConfigError("advisor clarification question is invalid")
+        else:
+            resolve_scenario(reply.get("scenario"), config.search, config.gpu_indexes)
+
+    client = advisor or LocalAdvisor(config.advisor)
+    reply = ask_advisor(client, "scene", {"description": description.strip()}, validate)
     if "question" in reply:
         question = reply["question"]
         if not isinstance(question, str) or not question.strip():
             raise ConfigError("advisor clarification question is invalid")
-        return {"status": "NEEDS_INPUT", "question": question.strip()}
+        return {"status": "NEEDS_INPUT", "question": question.strip(),
+                "advisor_requests": client.last_call if isinstance(client, LocalAdvisor) else None}
     supplied = reply.get("scenario")
     scene = resolve_scenario(supplied, config.search, config.gpu_indexes)
     if sha256_file(path) != before:
@@ -144,7 +286,8 @@ def extract_and_save_scenario(config_path: str | Path, description: str,
         "configuration" if key == "target_concurrency" and config.search.start_concurrency is not None
         else "default") for key in scene}
     return {"status": "PASS", "scenario": scene, "sources": sources,
-            "request_timeout": config.request_timeout, "config_path": str(path)}
+            "request_timeout": config.request_timeout, "config_path": str(path),
+            "advisor_requests": client.last_call if isinstance(client, LocalAdvisor) else None}
 
 
 def runtime_advisor_spec(settings: dict, config_path: Path) -> dict:

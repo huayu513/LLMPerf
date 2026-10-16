@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .adapters import _effective_max_running_requests
-from .advisor import LocalAdvisor, load_runtime_advisor
+from .advisor import LocalAdvisor, ask_advisor, load_runtime_advisor
 from .configuration import ADVISOR_TIMEOUT_SECONDS
 from .artifacts import sha256_file, write_json_atomic
 from .errors import ConfigError
@@ -306,9 +306,17 @@ class AdaptiveScheduler:
                 if isinstance(client, LocalAdvisor):
                     client = LocalAdvisor({**client.settings, "timeout_seconds": min(
                         float(client.settings["timeout_seconds"]), max(0.01, timeout_seconds))})
+
+                def validate(reply):
+                    selected, _, _ = self._validate_reply(reply, payload)
+                    if not selected:
+                        raise ValueError("no_valid_feedback_candidates")
+
                 try:
-                    reply = client.ask("next_experiments", payload)
+                    reply = ask_advisor(client, "next_experiments", payload, validate)
                 finally:
+                    if isinstance(client, LocalAdvisor):
+                        document["request_attempts"] = client.last_call
                     self.save()
                 selected, rejected, diagnosis = self._validate_reply(reply, payload)
                 document.update(response=redact(reply, self.secrets), validation_rejections=rejected,
