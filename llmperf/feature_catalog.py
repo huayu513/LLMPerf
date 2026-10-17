@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import re
 
@@ -98,3 +99,48 @@ def validate_combination(static, catalog):
 def native_summary(static):
     engine = static.get("engine", "sglang")
     return {key: copy.deepcopy(static[key]) for key in FEATURES.get(engine, {}) if key in static}
+
+
+def native_contract(static, catalog):
+    requested = {}
+    removed = {}
+    append = []
+    parameters = catalog["parameters"]
+    for name in FEATURES.get(catalog["engine"], {}):
+        if name not in static or static[name] is None or name not in parameters:
+            continue
+        value = static[name]
+        validate_value(name, value, catalog)
+        item = parameters[name]
+        flags = item["flags"]
+        boolean = FEATURES[catalog["engine"]][name] == "boolean"
+        removed.update({flag: not boolean for flag in flags})
+        if boolean:
+            if value:
+                append.append(next(flag for flag in flags if not flag.startswith("--no-")))
+            elif item.get("default") is True:
+                negative = next((flag for flag in flags if flag.startswith("--no-")), None)
+                if negative is None:
+                    raise ValueError(f"{name}: no safe native disable flag discovered")
+                append.append(negative)
+        else:
+            append.extend((flags[0], json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value)))
+        requested[name] = copy.deepcopy(value)
+    drop = []
+    if catalog["engine"] == "sglang":
+        if "speculative_algorithm" in requested:
+            removed.update({"--speculative-algorithm": True, "--speculative-dspark-block-size": True})
+        if "attn_dp_size" in parameters:
+            removed["--enable-dp-attention"] = False
+            append.extend((parameters["attn_dp_size"]["flags"][0], str(static.get("attn_dp_size", 1))))
+            requested["attn_dp_size"] = static.get("attn_dp_size", 1)
+            drop.append("dp_attention")
+        if "enable_dp_lm_head" not in parameters:
+            removed["--enable-dp-lm-head"] = False
+            drop.append("dp_lm_head")
+        for name, legacy in (("dp_size", "--dp"), ("tp_size", "--tp-size"), ("pp_size", "--pp-size")):
+            item = parameters.get(name)
+            if item and legacy not in item["flags"]:
+                removed[legacy] = True
+                append.extend((item["flags"][0], str(static.get({"dp_size": "dp", "tp_size": "tp", "pp_size": "pp"}[name], 1))))
+    return {"append": append, "remove_flags": removed, "requested": requested, "drop_requested": drop}

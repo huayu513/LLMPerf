@@ -73,10 +73,10 @@ load_profile() {
   require_bool ENABLE_HIERARCHICAL_CACHE "$ENABLE_HIERARCHICAL_CACHE"
   require_bool ENABLE_DSPARK "$ENABLE_DSPARK"
 
-  if [[ "$ENABLE_DP_LM_HEAD" == "1" && "$ENABLE_DP_ATTENTION" != "1" ]]; then
+  if [[ -z "${S1_SGLANG_NATIVE:-}" && "$ENABLE_DP_LM_HEAD" == "1" && "$ENABLE_DP_ATTENTION" != "1" ]]; then
     die "DP LM Head requires DP Attention in the unified profiles"
   fi
-  if [[ "$ENABLE_DSPARK" == "1" && "$ENABLE_DP_ATTENTION" == "1" &&
+  if [[ -z "${S1_SGLANG_NATIVE:-}" && "$ENABLE_DSPARK" == "1" && "$ENABLE_DP_ATTENTION" == "1" &&
         "$MOE_A2A_BACKEND" != "none" ]]; then
     die "DSpark with DP Attention requires MOE_A2A_BACKEND=none"
   fi
@@ -149,6 +149,17 @@ build_command() {
   fi
   [[ -n "$SWA_FULL_TOKENS_RATIO" ]] &&
     SERVER_COMMAND+=(--swa-full-tokens-ratio "$SWA_FULL_TOKENS_RATIO")
+  if [[ -n "${S1_SGLANG_NATIVE:-}" ]]; then
+    local native_file native_argument
+    native_file="$(mktemp)" || die "cannot prepare native arguments"
+    "${S1_MANIFEST_PYTHON:-python3}" "${SCRIPT_DIR}/native_args.py" "${SERVER_COMMAND[@]}" > "$native_file" || {
+      rm -f "$native_file"
+      die "native argument transformation failed"
+    }
+    SERVER_COMMAND=()
+    while IFS= read -r -d '' native_argument; do SERVER_COMMAND+=("$native_argument"); done < "$native_file"
+    rm -f "$native_file"
+  fi
   return 0
 }
 
@@ -360,6 +371,7 @@ case "$action" in
     build_command
     python3 - "${#SERVER_ENV[@]}" "${SERVER_ENV[@]}" "${SERVER_COMMAND[@]}" <<'PY'
 import json
+import os
 import sys
 
 count = int(sys.argv[1])
@@ -426,6 +438,7 @@ PY
       "$REASONING_PARSER" "$DEFAULT_CHAT_TEMPLATE_KWARGS" \
       "$QUANTIZATION" "${MODEL_IS_MOE:-0}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -454,6 +467,10 @@ if model_is_moe == "1" or runner:
     data["backend"] = runner or "auto"
 if model_is_moe == "1" or a2a:
     data["moe_a2a_backend"] = a2a or "auto"
+native = json.loads(os.environ.get("S1_SGLANG_NATIVE", "{}"))
+for key in native.get("drop_requested", []):
+    data.pop(key, None)
+data.update(native.get("requested", {}))
 Path(path).write_text(json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 PY
     print_shell_command > "${STATE_DIR}/server.command.sh"
