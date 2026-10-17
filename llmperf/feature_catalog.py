@@ -20,6 +20,25 @@ FEATURES = {
     },
 }
 
+PLANNER_PARAMETERS = {
+    "vllm": {
+        "tensor_parallel_size": ("tp", "integer"),
+        "data_parallel_size": ("dp", "integer"),
+        "pipeline_parallel_size": ("pp", "integer"),
+    },
+    "sglang": {
+        "tp_size": ("tp", "integer"), "dp_size": ("dp", "integer"),
+        "dp": ("dp", "integer"), "pp_size": ("pp", "integer"),
+        "attn_dp_size": ("attn_dp_size", "integer"),
+        "enable_dp_attention": ("dp_attention", "boolean"),
+    },
+}
+
+
+def planner_field(name, catalog):
+    entry = PLANNER_PARAMETERS.get(catalog["engine"], {}).get(name)
+    return entry[0] if entry else None
+
 
 def engine_catalog(engine, capabilities):
     schema = capabilities.get("schema", {})
@@ -29,10 +48,15 @@ def engine_catalog(engine, capabilities):
         parameters.setdefault(name, {"flags": [flag], "type": "unknown", "choices": None,
                                      "source": "serve-help", "status": "discovered"})
     for name, item in parameters.items():
-        item.update(id="parameter:" + name, integrated=name in FEATURES.get(engine, {}),
+        mapped = PLANNER_PARAMETERS.get(engine, {}).get(name)
+        integrated = name in FEATURES.get(engine, {}) or mapped is not None
+        item.update(id="parameter:" + name, integrated=integrated,
                     runtime_verified=False)
-        if name in FEATURES.get(engine, {}) and item.get("type") == "unknown":
-            item["type"] = FEATURES[engine][name]
+        if integrated and item.get("type", "unknown") == "unknown":
+            item["type"] = mapped[1] if mapped else FEATURES[engine][name]
+        if mapped:
+            item.update(integration="existing_planner", planner_field=mapped[0],
+                        semantics="select an existing legal topology; never resize an allocated candidate")
         if name == "speculative_config" and engine == "vllm":
             item["type"] = "object"
     return {"version": 1, "engine": engine, "parameters": parameters,
@@ -40,6 +64,12 @@ def engine_catalog(engine, capabilities):
             "documents": copy.deepcopy(schema.get("documents", {})),
             "errors": list(schema.get("errors", [])),
             "semantics": "discovered is not runtime verified; unintegrated is not unsupported"}
+
+
+def proposal_matches(static, params, catalog):
+    return all(static.get(planner_field(name, catalog) or name,
+                          1 if planner_field(name, catalog) == "attn_dp_size" else None) == value
+               for name, value in params.items())
 
 
 def validate_value(name, value, catalog):

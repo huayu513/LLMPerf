@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .artifacts import write_json_atomic
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
-from .feature_catalog import adapt_native_static, native_contract, native_summary
+from .feature_catalog import adapt_native_static, native_contract, native_summary, planner_field, proposal_matches
 from .planner import fingerprint
 
 
@@ -59,29 +59,58 @@ def feature_controls(plan, catalog, knobs, limit, experiments=()):
         return fingerprint({key: value for key, value in static.items()
                             if key not in {"feature_variant", "native_boolean_flags"}})
     seen = {identity(candidate.static_config) for candidate in bases}
+    existing = {identity(candidate.static_config): candidate for candidate in bases}
+    promoted = {}
+    rejections = []
+    attempts = 0
     proposals = [row["params"] for row in sorted(experiments, key=lambda item: item.get("priority", 0), reverse=True)]
     proposals += [{name: value} for name, values in knobs.items() for value in values]
     first = {name: values[0] for name, values in knobs.items() if values}
     proposals.extend(dict(pair) for pair in itertools.combinations(first.items(), 2))
-    for base, params in itertools.islice(itertools.chain.from_iterable(
-            [(base, params) for params in proposals] for base in bases), max(1, limit) * 16):
-        try:
-            static = adapt_native_static({**base.static_config, **params}, catalog)
-        except ValueError:
-            continue
-        key = identity(static)
-        if key in seen:
-            continue
-        seen.add(key)
-        static["feature_variant"] = json.dumps(native_summary(static), ensure_ascii=False, sort_keys=True)
-        digest = fingerprint(static)
-        variants.append(replace(base, id="native-" + digest[:16], static_config=static,
-            backend=static.get("backend", base.backend), dspark=static.get("dspark", base.dspark),
-            config_hash=digest, reasons=("镜像证据与顾问建议；待运行验证",)))
+    def cases(params):
+        nonlocal attempts
+        topology = {name: value for name, value in params.items() if planner_field(name, catalog)}
+        native = {name: value for name, value in params.items() if not planner_field(name, catalog)}
+        matched = [base for base in bases if proposal_matches(base.static_config, topology, catalog)]
+        if not matched and len(rejections) < 64:
+            rejections.append({"params": params, "reason": "no_existing_legal_topology"})
+        for base in matched:
+            if attempts >= max(1, limit) * 16:
+                return
+            attempts += 1
+            try:
+                static = adapt_native_static({**base.static_config, **native}, catalog)
+            except ValueError as exc:
+                if len(rejections) < 64:
+                    rejections.append({"base_id": base.id, "params": params, "reason": str(exc)[:500]})
+                continue
+            yield base, static, bool(topology)
+
+    for group in itertools.zip_longest(*(cases(params) for params in proposals)):
+        for case in group:
+            if case is None:
+                continue
+            base, static, has_topology = case
+            key = identity(static)
+            if key in seen:
+                if has_topology and key in existing:
+                    promoted[existing[key].id] = existing[key]
+                continue
+            seen.add(key)
+            static["feature_variant"] = json.dumps(native_summary(static), ensure_ascii=False, sort_keys=True)
+            digest = fingerprint(static)
+            variants.append(replace(base, id="native-" + digest[:16], static_config=static,
+                backend=static.get("backend", base.backend), dspark=static.get("dspark", base.dspark),
+                config_hash=digest, reasons=("镜像证据与顾问建议；待运行验证",)))
+            if len(variants) >= limit:
+                break
         if len(variants) >= limit:
             break
-    ordered = bases[:1] + variants + bases[1:]
+    ordered = bases[:1] + [candidate for candidate in promoted.values() if candidate.id != bases[0].id]
+    ordered += variants + [candidate for candidate in bases[1:] if candidate.id not in promoted]
     metadata = {**plan.metadata, "candidates": {candidate.id: asdict(candidate) for candidate in ordered}}
+    metadata["native_generation"] = {"attempts": attempts, "created": len(variants),
+        "promoted_topologies": list(promoted), "rejections": rejections, "variant_limit": limit}
     groups = {}
     for candidate in ordered:
         group = candidate.static_config.get("comparison_group")
@@ -89,6 +118,16 @@ def feature_controls(plan, catalog, knobs, limit, experiments=()):
             groups.setdefault(group, []).append(candidate.id)
     metadata["comparison_groups"] = groups
     return replace(plan, candidates=tuple(ordered), metadata=metadata)
+
+
+def proposal_outcomes(analysis, candidates, catalog):
+    proposals = [{"source": "feature", "params": {row["parameter"]: value}}
+                 for row in analysis.get("features", []) for value in row["values"]]
+    proposals += [{"source": "experiment", "params": row["params"]}
+                  for row in analysis.get("experiments", [])]
+    return [{**proposal, "candidate_ids": [candidate.id for candidate in candidates
+               if proposal_matches(candidate.static_config, proposal["params"], catalog)]}
+            for proposal in proposals]
 
 
 def preflight_candidates(plan, config, root, *, runner=subprocess.run):

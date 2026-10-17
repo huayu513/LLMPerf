@@ -21,8 +21,8 @@ from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
 from .capability_analysis import analyze_capabilities
-from .feature_catalog import adapt_native_static, native_summary
-from .native_planning import feature_controls, observed_knobs, preflight_candidates, proposal_knobs
+from .feature_catalog import adapt_native_static, native_summary, planner_field
+from .native_planning import feature_controls, observed_knobs, preflight_candidates, proposal_knobs, proposal_outcomes
 from .configuration import ADVISOR_TIMEOUT_SECONDS, RunConfig, load_config, resolve_scenario
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
@@ -59,7 +59,8 @@ def _catalog(plan: Plan, scenario: dict) -> dict:
         if "--max-num-batched-tokens" in options:
             minimum = max(knobs.get("max_num_seqs", [target]))
             knobs["max_num_batched_tokens"] = sorted({max(minimum, value) for value in (2048, 4096, 8192, 16384)})
-        knobs.update(plan.metadata.get("feature_knobs", {}))
+        knobs.update({name: values for name, values in plan.metadata.get("feature_knobs", {}).items()
+                      if not planner_field(name, plan.metadata["engine_catalog"])})
         return {"version": 1, "base_candidates": [asdict(candidate) for candidate in plan.candidates],
                 "knobs": knobs, "engine_catalog": plan.metadata.get("engine_catalog"),
                 "semantics": "vLLM-native options; omitted means keep the base value"}
@@ -69,7 +70,8 @@ def _catalog(plan: Plan, scenario: dict) -> dict:
         knobs["chunked_prefill_size"] = [2048, 4096, 8192, 16384]
     if "--max-running-requests" in options:
         knobs["max_running_requests"] = sorted({max(1, target // 2), target})
-    knobs.update(plan.metadata.get("feature_knobs", {}))
+    knobs.update({name: values for name, values in plan.metadata.get("feature_knobs", {}).items()
+                  if not planner_field(name, plan.metadata["engine_catalog"])})
     return {"version": 1, "base_candidates": [asdict(c) for c in plan.candidates],
             "knobs": knobs, "engine_catalog": plan.metadata.get("engine_catalog"),
             "semantics": "omitted means keep the base value; false is an explicit value"}
@@ -430,6 +432,8 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
     selected = {ident: candidate for ident, candidate in selected.items() if ident not in rejected}
     if not selected or baseline["id"] not in selected:
         raise ConfigError("baseline rejected by image native parser; inspect native-preflight.json")
+    template.metadata["capability_proposal_outcomes"] = proposal_outcomes(
+        template.metadata.get("capability_analysis", {}), selected.values(), template.metadata["engine_catalog"])
     template.metadata["capability_artifacts"] = {name: sha256_file(root / name) for name in
         ("engine-capabilities.json", "capability-analysis.json", "native-preflight.json") if (root / name).is_file()}
     effective_search = replace(config.search, concurrency_max=scene["target_concurrency"],
