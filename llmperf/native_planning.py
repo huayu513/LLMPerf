@@ -5,7 +5,9 @@ import copy
 import itertools
 import json
 import subprocess
+import time
 import uuid
+from collections import Counter
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -130,10 +132,29 @@ def proposal_outcomes(analysis, candidates, catalog):
             for proposal in proposals]
 
 
+def _preflight_results(results):
+    counts = {status: sum(row["status"] == status for row in results)
+              for status in ("preflight_passed", "parser_rejected", "unknown")}
+    reasons = Counter(row.get("reason", "native parser unavailable")[:2000]
+                      for row in results if row["status"] == "unknown")
+    status = "unknown" if not results or counts["unknown"] == len(results) else (
+        "partial" if counts["unknown"] else "completed")
+    return {"status": status, "counts": counts,
+            "unknown_reasons": [{"reason": reason, "count": count} for reason, count in reasons.most_common(8)],
+            "reason": "; ".join(reason for reason, _ in reasons.most_common(2))}
+
+
+def _needs_device_context(report):
+    reasons = [report.get("reason", "")] + [item["reason"] for item in report.get("unknown_reasons", [])]
+    return any(marker in reason.lower() for reason in reasons for marker in
+               ("failed to infer device type", "no cuda gpus are available", "no cuda-capable device"))
+
+
 def preflight_candidates(plan, config, root, *, runner=subprocess.run):
     catalog = plan.metadata["engine_catalog"]
     schema = plan.metadata["environment"].get("container", {}).get("capabilities", {}).get("schema", {})
-    report = {"version": 1, "scope": "native_parser_only", "runtime_verified": False, "results": []}
+    report = {"version": 2, "scope": "native_parser_only", "runtime_verified": False,
+              "results": [], "attempts": [], "timeout_seconds": 180}
     if schema.get("status") != "discovered":
         report["status"] = "unknown"
         report["reason"] = "structured_parser_not_discovered"
@@ -159,28 +180,54 @@ def preflight_candidates(plan, config, root, *, runner=subprocess.run):
         write_json_atomic(path, cases)
         source = (Path(__file__).resolve().parents[1] / "benchmarks/server/image_capabilities.py").read_text()
         script = source + f'\nfrom pathlib import Path\nprint("NATIVE_PREFLIGHT="+json.dumps(preflight({config.engine!r}, json.loads(Path("/cases.json").read_text()))))\n'
-        spec = DockerTaskSpec(config.image, "capability-preflight-" + uuid.uuid4().hex[:12],
-            mounts=(Mount(path, "/cases.json", True),), entrypoint="python3", command=("-c", script),
-            network_mode="none")
-        try:
-            completed = runner(DockerRuntime().build_run_command(spec), capture_output=True, text=True, timeout=180)
-            rows = [line.removeprefix("NATIVE_PREFLIGHT=") for line in completed.stdout.splitlines()
-                    if line.startswith("NATIVE_PREFLIGHT=")]
-            results = json.loads(rows[-1]) if rows else None
-            if (completed.returncode or not isinstance(results, list) or len(results) != len(plan.candidates)
-                    or not all(isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("status") in
-                               {"preflight_passed", "parser_rejected", "unknown"} for row in results)
-                    or {row["id"] for row in results} != {candidate.id for candidate in plan.candidates}):
-                raise ValueError("native parser probe incomplete: " + str(completed.stderr)[-1000:])
-            results = [{**row, "runtime_verified": False} for row in results]
-            report.update(status="completed", results=results)
-        except subprocess.TimeoutExpired as exc:
-            report.update(status="unknown", reason=str(exc)[-1000:])
+        selected = getattr(config, "gpu_indexes", None)
+        if selected is None:
+            selected = sorted({index for candidate in plan.candidates
+                               for index in candidate.static_config.get("gpu_indexes", [])})
+        contexts = [(), tuple(selected)] if selected else [()]
+        deadline = time.monotonic() + report["timeout_seconds"]
+        for indexes in contexts:
+            remaining = deadline - time.monotonic() if report["attempts"] else report["timeout_seconds"]
+            if remaining <= 0:
+                report.update(status="unknown", reason="native_preflight_time_budget_exhausted")
+                break
+            device_context = "selected_gpus" if indexes else "no_gpu"
+            env = {"CUDA_VISIBLE_DEVICES": ",".join(map(str, range(len(indexes)))),
+                   "NVIDIA_DRIVER_CAPABILITIES": "compute,utility"} if indexes else {
+                       "CUDA_VISIBLE_DEVICES": "", "NVIDIA_VISIBLE_DEVICES": "void"}
+            spec = DockerTaskSpec(config.image, "capability-preflight-" + uuid.uuid4().hex[:12],
+                gpu_indexes=indexes, mounts=(Mount(path, "/cases.json", True),), env=env,
+                entrypoint="python3", command=("-c", script), network_mode="none")
+            attempt = {"attempt": len(report["attempts"]) + 1, "device_context": device_context,
+                       "gpu_indexes": list(indexes), "timeout_seconds": remaining}
             try:
-                runner(["docker", "rm", "-f", spec.name], capture_output=True, text=True, timeout=10)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        except (OSError, ValueError) as exc:
-            report.update(status="unknown", reason=str(exc)[-1000:])
+                completed = runner(DockerRuntime().build_run_command(spec), capture_output=True, text=True, timeout=remaining)
+                rows = [line.removeprefix("NATIVE_PREFLIGHT=") for line in completed.stdout.splitlines()
+                        if line.startswith("NATIVE_PREFLIGHT=")]
+                results = json.loads(rows[-1]) if rows else None
+                if (completed.returncode or not isinstance(results, list) or len(results) != len(plan.candidates)
+                        or not all(isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("status") in
+                                   {"preflight_passed", "parser_rejected", "unknown"} for row in results)
+                        or {row["id"] for row in results} != {candidate.id for candidate in plan.candidates}):
+                    raise ValueError("native parser probe incomplete: " + str(completed.stderr)[-1000:])
+                results = [{**row, "runtime_verified": False} for row in results]
+                report.update(results=results, **_preflight_results(results))
+                attempt.update({key: report[key] for key in ("status", "counts", "unknown_reasons", "reason")})
+            except subprocess.TimeoutExpired as exc:
+                report.update(status="unknown", reason=str(exc)[-1000:])
+                attempt.update(status="unknown", reason=report["reason"])
+                try:
+                    runner(["docker", "rm", "-f", spec.name], capture_output=True, text=True, timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            except (OSError, ValueError) as exc:
+                report.update(status="unknown", reason=str(exc)[-1000:])
+                attempt.update(status="unknown", reason=report["reason"])
+            report["attempts"].append(attempt)
+            report["device_context"] = device_context
+            if indexes or not _needs_device_context(report):
+                break
+            if not selected:
+                report["retry_unavailable"] = "no_selected_gpu_context"
     write_json_atomic(root / "native-preflight.json", report)
     return report

@@ -133,8 +133,11 @@ def preflight(engine, cases):
                 parser.parse_args(case["argv"])
             result = {"status": "preflight_passed", "scope": "native_parser",
                       "runtime_verified": False}
-        except (Exception, SystemExit) as exc:
+        except (argparse.ArgumentError, SystemExit) as exc:
             result = {"status": "parser_rejected", "scope": "native_parser",
+                      "reason": type(exc).__name__ + ": " + str(exc)[:500] + " " + diagnostics.getvalue()[-1500:]}
+        except Exception as exc:
+            result = {"status": "unknown", "scope": "native_parser",
                       "reason": type(exc).__name__ + ": " + str(exc)[:500] + " " + diagnostics.getvalue()[-1500:]}
         results.append({"id": case["id"], **result})
     return results
