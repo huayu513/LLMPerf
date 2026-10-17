@@ -37,7 +37,9 @@ def candidate_summary(candidate: dict) -> dict:
                         "mem_fraction_static", "chunked_prefill_size", "max_running_requests",
                         "gpu_memory_utilization", "max_num_seqs", "max_num_batched_tokens",
                         "max_model_len", "enable_expert_parallel", "all2all_backend", "moe_backend",
-                        "speculative_config") if key in static},
+                        "speculative_config", "attn_dp_size", "ep_size", "speculative_algorithm",
+                        "speculative_num_draft_tokens", "speculative_dspark_block_size",
+                        "speculative_num_steps", "speculative_eagle_topk", "moe_runner_backend") if key in static},
             "deployment": {key: deployment.get(key) for key in
                            ("label", "instance_count", "gpus_per_instance", "total_gpu_count")}}
 

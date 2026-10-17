@@ -23,7 +23,7 @@ def analyze_capabilities(catalog, context, client, root, *, max_rounds=3):
     visible = {key: value for key, value in evidence.items()
                if key.startswith("nested:") or key.startswith("parameter:") and value.get("integrated")}
     report = {"version": 1, "status": "FALLBACK", "engine": catalog["engine"], "rounds": [],
-              "features": [], "hypotheses": [], "unknowns": [], "rejections": [],
+              "features": [], "experiments": [], "hypotheses": [], "unknowns": [], "rejections": [],
               "budget": {"max_rounds": max_rounds, "timeout_seconds": timeout},
               "semantics": "advisor hypotheses are not native validation or runtime verification"}
     secrets = ()
@@ -50,11 +50,11 @@ def analyze_capabilities(catalog, context, client, root, *, max_rounds=3):
         active = LocalAdvisor({**client.settings, "timeout_seconds": remaining}) if isinstance(client, LocalAdvisor) else client
         try:
             def validate(reply):
-                if set(reply) - {"read_evidence", "features", "hypotheses", "unknowns"}:
+                if set(reply) - {"read_evidence", "features", "experiments", "hypotheses", "unknowns"}:
                     raise ValueError("unknown capability analysis fields")
-                if not any(key in reply for key in ("read_evidence", "features", "unknowns")):
+                if not any(key in reply for key in ("read_evidence", "features", "experiments", "unknowns")):
                     raise ValueError("capability analysis must request evidence or return findings")
-                for key in ("read_evidence", "features", "hypotheses", "unknowns"):
+                for key in ("read_evidence", "features", "experiments", "hypotheses", "unknowns"):
                     if key in reply and (not isinstance(reply[key], list) or len(reply[key]) > 32):
                         raise ValueError(f"{key} must be a bounded list")
 
@@ -87,6 +87,22 @@ def analyze_capabilities(catalog, context, client, root, *, max_rounds=3):
                     report["rejections"].append({"reason": str(exc)[:500]})
             for key in ("hypotheses", "unknowns"):
                 report[key].extend(item[:2000] for item in reply.get(key, []) if isinstance(item, str))
+            for row in reply.get("experiments", []):
+                try:
+                    if not isinstance(row, dict) or set(row) - {"params", "priority", "reason", "evidence_ids"}:
+                        raise ValueError("invalid experiment proposal")
+                    params = row.get("params")
+                    if not isinstance(params, dict) or not 1 <= len(params) <= 8:
+                        raise ValueError("experiment needs 1..8 native parameters")
+                    if not row.get("evidence_ids") or not all(ident in visible for ident in row["evidence_ids"]):
+                        raise ValueError("experiment needs provided evidence references")
+                    for name, value in params.items():
+                        validate_value(name, value, catalog)
+                    if type(row.get("priority", 0)) is not int or not isinstance(row.get("reason", ""), str):
+                        raise ValueError("invalid experiment priority or reason")
+                    report["experiments"].append({**copy.deepcopy(row), "runtime_verified": False})
+                except (ValueError, KeyError, TypeError) as exc:
+                    report["rejections"].append({"reason": str(exc)[:500]})
             report["status"] = "PASS"
             if not reads:
                 break

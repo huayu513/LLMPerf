@@ -20,6 +20,9 @@ from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
 from .capabilities import probe_environment
+from .capability_analysis import analyze_capabilities
+from .feature_catalog import adapt_native_static, native_summary
+from .native_planning import feature_controls, observed_knobs, preflight_candidates, proposal_knobs
 from .configuration import ADVISOR_TIMEOUT_SECONDS, RunConfig, load_config, resolve_scenario
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
@@ -56,16 +59,20 @@ def _catalog(plan: Plan, scenario: dict) -> dict:
         if "--max-num-batched-tokens" in options:
             minimum = max(knobs.get("max_num_seqs", [target]))
             knobs["max_num_batched_tokens"] = sorted({max(minimum, value) for value in (2048, 4096, 8192, 16384)})
+        knobs.update(plan.metadata.get("feature_knobs", {}))
         return {"version": 1, "base_candidates": [asdict(candidate) for candidate in plan.candidates],
-                "knobs": knobs, "semantics": "vLLM-native options; omitted means keep the base value"}
+                "knobs": knobs, "engine_catalog": plan.metadata.get("engine_catalog"),
+                "semantics": "vLLM-native options; omitted means keep the base value"}
     if "--mem-fraction-static" in options:
         knobs["mem_fraction_static"] = [0.75, 0.8, 0.85, 0.9]
     if "--chunked-prefill-size" in options:
         knobs["chunked_prefill_size"] = [2048, 4096, 8192, 16384]
     if "--max-running-requests" in options:
         knobs["max_running_requests"] = sorted({max(1, target // 2), target})
+    knobs.update(plan.metadata.get("feature_knobs", {}))
     return {"version": 1, "base_candidates": [asdict(c) for c in plan.candidates],
-            "knobs": knobs, "semantics": "omitted means keep the base value; false is an explicit value"}
+            "knobs": knobs, "engine_catalog": plan.metadata.get("engine_catalog"),
+            "semantics": "omitted means keep the base value; false is an explicit value"}
 
 
 def _visible_catalog(catalog: dict, batch: int) -> dict:
@@ -77,6 +84,7 @@ def _visible_catalog(catalog: dict, batch: int) -> dict:
         {"base_id": row["id"], "tp": row["tp"], "dp": row["dp"],
          "pp": row["pp"], "dp_attention": row["dp_attention"],
          "backend": row["backend"], "dspark": row["dspark"],
+         "native_features": native_summary(row["static_config"]),
          "deployment": row["static_config"].get("deployment", {}).get("label")}
         for row in bases]}
 
@@ -101,11 +109,12 @@ def _from_suggestion(item: Any, catalog: dict) -> CandidateConfig:
     base = bases[base_id]
     static = copy.deepcopy(base["static_config"])
     static.update(params)
+    static = adapt_native_static(static, catalog.get("engine_catalog"))
     digest = fingerprint(static)
     return CandidateConfig(
         id=f"scene-{digest[:16]}", tp=base["tp"], dp=base["dp"], pp=base["pp"],
-        dp_attention=base["dp_attention"], backend=base["backend"],
-        dspark=base["dspark"], gpu_indexes=tuple(base["gpu_indexes"]),
+        dp_attention=base["dp_attention"], backend=static.get("backend", base["backend"]),
+        dspark=static.get("dspark", base["dspark"]), gpu_indexes=tuple(base["gpu_indexes"]),
         status="CANDIDATE", reasons=(reason,) if reason else (),
         static_config=static, config_hash=digest,
     )
@@ -196,7 +205,7 @@ def _calibrate_scene(root: Path, config, model, scene: dict) -> dict:
 
 
 def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool, probe,
-                     calibrate: bool) -> tuple[Path, Plan, dict]:
+                     calibrate: bool, advisor=None) -> tuple[Path, Plan, dict]:
     if config.advisor is None:
         raise ConfigError("advisor settings are required for tune")
     if use_captured and config.input_path is None:
@@ -233,6 +242,33 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
     if index["jsonl_sha256"] != workload.sha256:
         raise ConfigError("workload changed during preparation")
     plan = create_search_plan(effective_config, model, workload, env, root)
+    image_catalog = plan.metadata["engine_catalog"]
+    write_json_atomic(root / "engine-capabilities.json", image_catalog)
+    print(json.dumps({"event": "capability_analysis_start", "engine": config.engine,
+                      "result_dir": str(root)}), flush=True)
+    context = {"model": {key: value for key, value in model.raw.items()
+                         if key not in {"inventory", "provenance"}},
+               "gpus": [gpu.to_dict() for gpu in env.gpus], "scenario": scene,
+               "versions": env.container.get("versions", {}),
+               "image": config.image, "user_restrictions": config.engine_options,
+               "search_backends": config.search.backends}
+    analysis = analyze_capabilities(image_catalog, context, advisor or LocalAdvisor(config.advisor), root)
+    proposals, restrictions = proposal_knobs(analysis, config)
+    fallback, _ = proposal_knobs({"features": [{"parameter": name, "values": values}
+        for name, values in observed_knobs(image_catalog).items()]}, config)
+    knobs = {**fallback, **proposals}
+    plan.metadata.update(capability_analysis=analysis, feature_knobs=knobs,
+                         feature_restrictions=restrictions)
+    pool_limit = config.search.adaptive.candidate_pool_limit if config.search.strategy == "adaptive" else config.search.max_trials
+    experiments = []
+    for experiment in analysis.get("experiments", []):
+        _, blocked = proposal_knobs({"features": [{"parameter": key, "values": [value]}
+            for key, value in experiment["params"].items()]}, config)
+        if blocked:
+            restrictions.extend(blocked)
+        else:
+            experiments.append(experiment)
+    plan = feature_controls(plan, image_catalog, knobs, pool_limit, experiments)
     if effective_config.engine == "sglang" and model.raw.get("is_moe"):
         image = env.image.to_dict() if hasattr(env.image, "to_dict") else dict(env.image)
         if image.get("image_id"):
@@ -291,7 +327,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
     if exploration_capacity < 2:
         raise ConfigError("search.max_trials must allow two explorations plus winner and baseline repeats")
     root, template, catalog = _prepare_new_run(config_path, config, use_captured=use_captured,
-                                                probe=probe, calibrate=calibrate)
+                                                probe=probe, calibrate=calibrate, advisor=advisor)
     if sha256_file(config_path) != source_hash:
         raise ConfigError("experiment.json changed during intelligent planning; generate a new plan")
     print(json.dumps({"event": "run_created", "result_dir": str(root)}), flush=True)
@@ -353,7 +389,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
                                     "reasons": tuple(row.get("reasons", ()))})
                  for row in catalog["base_candidates"]]
         pool = build_candidate_pool(bases, catalog["knobs"], scene["target_concurrency"],
-                                    capacity, seeds=selected.values())
+                                    capacity, seeds=selected.values(), feature_catalog=catalog.get("engine_catalog"))
         selected = {candidate.id: candidate for candidate in pool}
         template.metadata["adaptive_policy"] = {"version": 1, **asdict(config.search.adaptive)}
         template.metadata["runtime_advisor"] = runtime_advisor_spec(config.advisor, config_path)
@@ -387,6 +423,15 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
                 break
 
     source = Path(template.metadata["jsonl_host"])
+    draft = Plan(root.name, candidates=tuple(selected.values()), metadata=template.metadata)
+    preflight = preflight_candidates(draft, config, root)
+    rejected = {row["id"] for row in preflight["results"] if row.get("status") == "parser_rejected"}
+    template.metadata["native_preflight"] = preflight
+    selected = {ident: candidate for ident, candidate in selected.items() if ident not in rejected}
+    if not selected or baseline["id"] not in selected:
+        raise ConfigError("baseline rejected by image native parser; inspect native-preflight.json")
+    template.metadata["capability_artifacts"] = {name: sha256_file(root / name) for name in
+        ("engine-capabilities.json", "capability-analysis.json", "native-preflight.json") if (root / name).is_file()}
     effective_search = replace(config.search, concurrency_max=scene["target_concurrency"],
                                start_concurrency=scene["target_concurrency"])
     effective = replace(config, input_path=source, search=effective_search)

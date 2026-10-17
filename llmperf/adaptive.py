@@ -13,6 +13,7 @@ from .advisor import LocalAdvisor, ask_advisor, load_runtime_advisor
 from .configuration import ADVISOR_TIMEOUT_SECONDS
 from .artifacts import sha256_file, write_json_atomic
 from .errors import ConfigError
+from .feature_catalog import adapt_native_static, native_summary
 from .evidence import candidate_summary, environment_summary, redact, summarize_trial
 from .planner import fingerprint
 from .types import CandidateConfig, PlanTask
@@ -53,7 +54,7 @@ def _parameter_variations(knobs: dict):
 
 
 def build_candidate_pool(bases: list[CandidateConfig], knobs: dict, target: int,
-                         limit: int, seeds=()) -> tuple[CandidateConfig, ...]:
+                         limit: int, seeds=(), feature_catalog=None) -> tuple[CandidateConfig, ...]:
     selected = []
     identities = set()
 
@@ -68,8 +69,13 @@ def build_candidate_pool(bases: list[CandidateConfig], knobs: dict, target: int,
         yield base
         for params in _parameter_variations(knobs):
             static = {**copy.deepcopy(base.static_config), **params}
+            try:
+                static = adapt_native_static(static, feature_catalog)
+            except ValueError:
+                continue
             digest = fingerprint(static)
             yield replace(base, id=f"scene-{digest[:16]}", static_config=static,
+                          backend=static.get("backend", base.backend), dspark=static.get("dspark", base.dspark),
                           config_hash=digest, reasons=("rule catalog",))
 
     for candidate in seeds:
@@ -88,7 +94,8 @@ def _family(candidate):
     return tuple(static.get(key) for key in
                  ("tp", "dp", "pp", "dp_attention", "backend", "dspark")) + (
         static.get("deployment", {}).get("instance_count", 1),
-        tuple(static.get("gpu_indexes", candidate.get("gpu_indexes", []))))
+        tuple(static.get("gpu_indexes", candidate.get("gpu_indexes", []))),
+        static.get("attn_dp_size"), json.dumps(native_summary(static), sort_keys=True))
 
 
 class AdaptiveScheduler:
@@ -215,6 +222,8 @@ class AdaptiveScheduler:
             "evidence": [row["evidence"] for row in observations],
             "shortlist": [candidate_summary(self.candidates[ident]) for ident in shortlist],
             "remaining_trials": remaining_trials,
+            "capability_analysis": {key: self.metadata.get("capability_analysis", {}).get(key)
+                                    for key in ("status", "features", "hypotheses", "unknowns")},
             "remaining_seconds": remaining_seconds,
             "remaining_advisor_calls": self.policy["max_advisor_calls"] - self.progress["advisor_calls"],
             "batch_size": batch_size,

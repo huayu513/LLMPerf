@@ -53,7 +53,9 @@ class LocalAdvisor:
                 f"Analyze this installed {engine_name} image, model and hardware evidence. Return JSON only: "
                 '{"read_evidence":["available evidence id"],"features":[{"parameter":"native parameter",'
                 '"values":["typed proposed value"],"priority":1,"reason":"Chinese rationale",'
-                '"evidence_ids":["provided evidence id"]}],"hypotheses":["conditional compatibility"],'
+                '"evidence_ids":["provided evidence id"]}],"experiments":[{"params":{},"priority":1,'
+                '"reason":"Chinese control-group rationale","evidence_ids":["provided evidence id"]}],'
+                '"hypotheses":["conditional compatibility"],'
                 '"unknowns":["missing evidence or unintegrated feature"]}. '
                 "You may request supplied evidence IDs for read-only supplemental inspection. "
                 "Do not invent supported methods, hardware restrictions or values absent from evidence. "

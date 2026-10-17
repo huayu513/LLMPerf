@@ -125,13 +125,14 @@ def preflight(engine, cases):
         return [{"id": case["id"], "status": "unknown", "scope": "native_parser",
                  "reason": type(exc).__name__ + ": " + str(exc)[:500]} for case in cases]
     for case in cases:
+        diagnostics = io.StringIO()
         try:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with contextlib.redirect_stdout(diagnostics), contextlib.redirect_stderr(diagnostics):
                 parser.parse_args(case["argv"])
             result = {"status": "preflight_passed", "scope": "native_parser",
                       "runtime_verified": False}
         except (Exception, SystemExit) as exc:
             result = {"status": "parser_rejected", "scope": "native_parser",
-                      "reason": type(exc).__name__ + ": " + str(exc)[:500]}
+                      "reason": type(exc).__name__ + ": " + str(exc)[:500] + " " + diagnostics.getvalue()[-1500:]}
         results.append({"id": case["id"], **result})
     return results

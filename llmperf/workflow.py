@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from .errors import ConfigError
 from .planner import _jsonable, create_search_plan, fingerprint, load_plan, write_plan
 from .search import execute_search
 from .types import DockerConfig, PathConfig
+from .native_planning import feature_controls, observed_knobs, preflight_candidates, proposal_knobs
 
 
 def _probe_config(config, root):
@@ -67,6 +68,11 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     if stop_after == 'prepare':
         return {'command': stop_after, 'status': 'PASS', 'result_dir': str(root), 'requests': index['count']}
     plan = create_search_plan(config, model, workload, env, root)
+    write_json_atomic(root / 'engine-capabilities.json', plan.metadata['engine_catalog'])
+    knobs, restrictions = proposal_knobs({'features': [
+        {'parameter': name, 'values': values} for name, values in observed_knobs(plan.metadata['engine_catalog']).items()]}, config)
+    plan.metadata.update(feature_knobs=knobs, feature_restrictions=restrictions)
+    plan = feature_controls(plan, plan.metadata['engine_catalog'], knobs, config.search.max_trials)
     if config.engine == 'sglang' and model.raw.get('is_moe'):
         print(json.dumps({'event': 'backend_resolution_start',
                           'candidates': len(plan.candidates)}), flush=True)
@@ -100,6 +106,15 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
                               plan.metadata['backend_resolution']['added_from_auto']),
                           'candidates': len(plan.candidates)}), flush=True)
     plan.metadata['configuration'] = configuration
+    preflight = preflight_candidates(plan, config, root)
+    plan.metadata['native_preflight'] = preflight
+    plan.metadata['capability_artifacts'] = {name: sha256_file(root / name) for name in
+        ('engine-capabilities.json', 'native-preflight.json') if (root / name).is_file()}
+    rejected = {row['id'] for row in preflight['results'] if row.get('status') == 'parser_rejected'}
+    plan = replace(plan, candidates=tuple(candidate for candidate in plan.candidates if candidate.id not in rejected))
+    plan.metadata['candidates'] = {candidate.id: asdict(candidate) for candidate in plan.candidates}
+    if not plan.candidates:
+        raise ConfigError('all candidates rejected by native parser; inspect native-preflight.json')
     plan.metadata['bundle_fingerprint'] = _bundle_fingerprint()
     plan.metadata['index_fingerprint'] = sha256_file(root / 'data' / 'replay_index.json')
     write_plan(root / 'plan.json', plan)
@@ -119,6 +134,10 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
     plan = load_plan(path)
     metadata = plan.metadata
     root = path.parent
+    for name, digest in metadata.get('capability_artifacts', {}).items():
+        artifact = (root / name).resolve()
+        if not artifact.is_relative_to(root) or not artifact.is_file() or sha256_file(artifact) != digest:
+            raise ConfigError('capability evidence changed since planning; generate a new plan')
     if metadata.get('workflow_mode') == 'tune':
         lock_path = root / 'plan-lock.json'
         try:

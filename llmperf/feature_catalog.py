@@ -33,6 +33,8 @@ def engine_catalog(engine, capabilities):
                     runtime_verified=False)
         if name in FEATURES.get(engine, {}) and item.get("type") == "unknown":
             item["type"] = FEATURES[engine][name]
+        if name == "speculative_config" and engine == "vllm":
+            item["type"] = "object"
     return {"version": 1, "engine": engine, "parameters": parameters,
             "nested": copy.deepcopy(schema.get("nested", {})),
             "documents": copy.deepcopy(schema.get("documents", {})),
@@ -53,7 +55,7 @@ def validate_value(name, value, catalog):
     if datatype not in expected or not isinstance(value, expected[datatype]) or (
             isinstance(value, bool) and datatype != "boolean"):
         raise ValueError(f"{name}: invalid {datatype} value")
-    if isinstance(value, (int, float)) and (not math.isfinite(value) or value <= 0):
+    if type(value) in (int, float) and (not math.isfinite(value) or value <= 0):
         raise ValueError(f"{name}: requires a positive finite value")
     if isinstance(value, str) and (not value or len(value) > 200 or not re.fullmatch(r"[A-Za-z0-9_.:+-]+", value)):
         raise ValueError(f"{name}: invalid native identifier")
@@ -88,6 +90,8 @@ def validate_value(name, value, catalog):
 def validate_combination(static, catalog):
     for name in FEATURES.get(catalog["engine"], {}):
         if name in static and static[name] is not None:
+            if static[name] is False and name not in catalog["parameters"]:
+                continue
             validate_value(name, static[name], catalog)
     world = int(static.get("world_size", 1))
     if "ep_size" in static and (static["ep_size"] > world or world % static["ep_size"]):
@@ -99,6 +103,25 @@ def validate_combination(static, catalog):
 def native_summary(static):
     engine = static.get("engine", "sglang")
     return {key: copy.deepcopy(static[key]) for key in FEATURES.get(engine, {}) if key in static}
+
+
+def adapt_native_static(static, catalog):
+    static = copy.deepcopy(static)
+    if catalog is None:
+        return static
+    validate_combination(static, catalog)
+    if catalog["engine"] == "sglang":
+        if "speculative_algorithm" in static:
+            static["dspark"] = static["speculative_algorithm"].upper() == "DSPARK"
+        if "moe_runner_backend" in static:
+            static["backend"] = static["moe_runner_backend"]
+    else:
+        flags = {name: next((flag for flag in item["flags"]
+            if flag.startswith("--no-")), None) for name, item in catalog["parameters"].items()
+            if item.get("type") == "boolean" and any(flag.startswith("--no-") for flag in item["flags"])}
+        if flags:
+            static["native_boolean_flags"] = flags
+    return static
 
 
 def native_contract(static, catalog):
