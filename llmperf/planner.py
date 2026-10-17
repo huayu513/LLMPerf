@@ -202,7 +202,9 @@ def create_search_plan(config, model, workload, env, result_dir):
     layers = model.raw.get('num_hidden_layers')
     dpa_supported = engine == 'sglang' and bool({'--enable-dp-attention', '--attn-dp-size'} & options)
     dspark_supported = (engine == 'sglang' and
+                        caps.get('schema', {}).get('status') != 'discovered' and
                         {'--speculative-algorithm', '--speculative-dspark-block-size'} <= options)
+    a2a_default = catalog['parameters'].get('moe_a2a_backend', {}).get('default')
     candidates = []
     for gpu_group in groups:
         for deployment in _deployment_layouts(gpu_group):
@@ -250,7 +252,8 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         feature_variant=(
                                             "dp_attention" if dpa else "baseline"
                                         ) + ("+dspark" if dspark else ""),
-                                        moe_a2a_backend='none' if is_moe else None,
+                                        moe_a2a_backend=(a2a_default if isinstance(a2a_default, str) and a2a_default
+                                                         else 'none') if is_moe else None,
                                         mem_fraction_static=0.85, max_running_requests=config.search.concurrency_max,
                                         chunked_prefill_size=8192)
                                     if engine == 'vllm':

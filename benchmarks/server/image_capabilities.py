@@ -92,6 +92,7 @@ def collect_schema(engine):
                 datatype = {int: "integer", float: "number", str: "string"}[action.type]
             result["parameters"][action.dest] = {
                 "flags": flags, "type": datatype, "default": plain(action.default),
+                "default_known": action.default is not argparse.SUPPRESS,
                 "choices": plain(list(action.choices)) if action.choices is not None else None,
                 "help": str(action.help or "")[:3000], "nargs": plain(action.nargs),
                 "source": module.__name__ + ":argparse", "action": type(action).__name__,
@@ -105,6 +106,7 @@ def collect_schema(engine):
                 result["nested"]["speculative_config"] = {
                     name: {**annotation_info(annotation),
                            "default": plain(fields[name].default) if name in fields else None,
+                           "default_known": name in fields and fields[name].default is not dataclasses.MISSING,
                            "source": spec_module.__name__ + ":" + name}
                     for name, annotation in hints.items() if not name.startswith("_")}
                 result["documents"][spec_module.__name__] = source_document(spec_module, keywords)

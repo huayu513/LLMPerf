@@ -55,7 +55,10 @@ def observed_knobs(catalog):
 def feature_controls(plan, catalog, knobs, limit, experiments=()):
     bases = list(plan.candidates)
     variants = []
-    seen = {candidate.config_hash for candidate in bases}
+    def identity(static):
+        return fingerprint({key: value for key, value in static.items()
+                            if key not in {"feature_variant", "native_boolean_flags"}})
+    seen = {identity(candidate.static_config) for candidate in bases}
     proposals = [row["params"] for row in sorted(experiments, key=lambda item: item.get("priority", 0), reverse=True)]
     proposals += [{name: value} for name, values in knobs.items() for value in values]
     first = {name: values[0] for name, values in knobs.items() if values}
@@ -66,11 +69,12 @@ def feature_controls(plan, catalog, knobs, limit, experiments=()):
             static = adapt_native_static({**base.static_config, **params}, catalog)
         except ValueError:
             continue
+        key = identity(static)
+        if key in seen:
+            continue
+        seen.add(key)
         static["feature_variant"] = json.dumps(native_summary(static), ensure_ascii=False, sort_keys=True)
         digest = fingerprint(static)
-        if digest in seen:
-            continue
-        seen.add(digest)
         variants.append(replace(base, id="native-" + digest[:16], static_config=static,
             backend=static.get("backend", base.backend), dspark=static.get("dspark", base.dspark),
             config_hash=digest, reasons=("镜像证据与顾问建议；待运行验证",)))
@@ -97,8 +101,17 @@ def preflight_candidates(plan, config, root, *, runner=subprocess.run):
     else:
         cases = []
         for candidate in plan.candidates:
-            contract = native_contract(candidate.static_config, catalog)
+            static = candidate.static_config
+            contract = native_contract(static, catalog)
             argv = list(contract["append"])
+            names = (("tp_size", "tp"), ("dp_size", "dp"), ("pp_size", "pp")) if config.engine == "sglang" else (
+                ("tensor_parallel_size", "tp"), ("data_parallel_size", "dp"), ("pipeline_parallel_size", "pp"))
+            for name, key in names:
+                item = catalog["parameters"].get(name)
+                if item and not any(flag in argv for flag in item["flags"]):
+                    argv += [item["flags"][0], str(static.get(key, 1))]
+            if config.engine == "sglang" and "attn_dp_size" not in catalog["parameters"] and static.get("dp_attention"):
+                argv.append("--enable-dp-attention")
             model = catalog["parameters"].get("model_path" if config.engine == "sglang" else "model")
             if model:
                 argv += [model["flags"][0], "/model"]
@@ -115,11 +128,20 @@ def preflight_candidates(plan, config, root, *, runner=subprocess.run):
             rows = [line.removeprefix("NATIVE_PREFLIGHT=") for line in completed.stdout.splitlines()
                     if line.startswith("NATIVE_PREFLIGHT=")]
             results = json.loads(rows[-1]) if rows else None
-            if completed.returncode or not isinstance(results, list) or not all(isinstance(row, dict) for row in results) or {
-                    row.get("id") for row in results} != {candidate.id for candidate in plan.candidates}:
+            if (completed.returncode or not isinstance(results, list) or len(results) != len(plan.candidates)
+                    or not all(isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("status") in
+                               {"preflight_passed", "parser_rejected", "unknown"} for row in results)
+                    or {row["id"] for row in results} != {candidate.id for candidate in plan.candidates}):
                 raise ValueError("native parser probe incomplete: " + str(completed.stderr)[-1000:])
+            results = [{**row, "runtime_verified": False} for row in results]
             report.update(status="completed", results=results)
-        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            report.update(status="unknown", reason=str(exc)[-1000:])
+            try:
+                runner(["docker", "rm", "-f", spec.name], capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except (OSError, ValueError) as exc:
             report.update(status="unknown", reason=str(exc)[-1000:])
     write_json_atomic(root / "native-preflight.json", report)
     return report

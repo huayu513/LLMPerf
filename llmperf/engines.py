@@ -62,4 +62,9 @@ def vllm_plan_settings(config, model, capabilities):
     missing = sorted(required - options)
     if missing:
         raise ConfigError("configured image lacks required vLLM launch options: " + ", ".join(missing))
+    negative_flags = {name: next(flag for flag in item["flags"] if flag.startswith("--no-"))
+                      for name, item in discovered.items() if item.get("type") == "boolean"
+                      and any(flag.startswith("--no-") for flag in item["flags"])}
+    if negative_flags:
+        native["native_boolean_flags"] = negative_flags
     return native, [None if value == "auto" else value for value in backends], parsers

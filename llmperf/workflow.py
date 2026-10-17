@@ -113,6 +113,8 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     rejected = {row['id'] for row in preflight['results'] if row.get('status') == 'parser_rejected'}
     plan = replace(plan, candidates=tuple(candidate for candidate in plan.candidates if candidate.id not in rejected))
     plan.metadata['candidates'] = {candidate.id: asdict(candidate) for candidate in plan.candidates}
+    plan.metadata['comparison_groups'] = {name: [ident for ident in ids if ident not in rejected]
+        for name, ids in plan.metadata.get('comparison_groups', {}).items() if any(ident not in rejected for ident in ids)}
     if not plan.candidates:
         raise ConfigError('all candidates rejected by native parser; inspect native-preflight.json')
     plan.metadata['bundle_fingerprint'] = _bundle_fingerprint()
