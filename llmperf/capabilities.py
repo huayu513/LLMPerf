@@ -196,13 +196,15 @@ _HELP_END = "S1SLOW_SGLANG_HELP_END"
 
 
 def _container_probe(engine: str) -> str:
-    if engine == "sglang":
-        return _CONTAINER_PROBE
-    if engine != "vllm":
+    if engine not in {"sglang", "vllm"}:
         raise ValueError(f"unsupported engine: {engine}")
-    return (_CONTAINER_PROBE.replace("sglang", "vllm")
+    script = _CONTAINER_PROBE if engine == "sglang" else (_CONTAINER_PROBE.replace("sglang", "vllm")
             .replace("SGLANG", "VLLM")
             .replace('["vllm","serve","--help"]', '["vllm","serve","--help=all"]'))
+    source = (Path(__file__).resolve().parents[1] / "benchmarks/server/image_capabilities.py").read_text()
+    return script.replace('print("S1SLOW_PROBE_JSON="',
+                          f'exec({source!r})\nfacts["argument_schema"]=collect_schema({engine!r})\n'
+                          'print("S1SLOW_PROBE_JSON="')
 
 
 def _parse_container_probe(text: str, engine: str = "sglang") -> tuple[dict[str, Any], str | None]:
@@ -347,6 +349,19 @@ def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) ->
             "options": [], "runner_backends": [], "a2a_backends": [],
             "tool_parsers": [], "reasoning_parsers": [],
         }
+        schema = probe_facts.get("argument_schema")
+        if isinstance(schema, dict):
+            capabilities["schema"] = schema
+            parameters = schema.get("parameters", {})
+            capabilities["options"] = sorted(set(capabilities["options"]) | {
+                flag for item in parameters.values() for flag in item.get("flags", [])})
+            for key, names in {"runner_backends": ("moe_backend", "moe_runner_backend"),
+                               "a2a_backends": ("all2all_backend", "moe_a2a_backend"),
+                               "tool_parsers": ("tool_call_parser",),
+                               "reasoning_parsers": ("reasoning_parser",)}.items():
+                discovered = [choice for name in names for choice in parameters.get(name, {}).get("choices") or []
+                              if isinstance(choice, str)]
+                capabilities[key] = sorted(set(capabilities[key]) | set(discovered))
         probe_ok = (probe.returncode == 0 and versions_ok and cuda_ok and allocation_ok
                     and help_text is not None and not probe_facts.get("probe_errors"))
         versions = {key: probe_facts.get(key) for key in required}

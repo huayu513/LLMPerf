@@ -309,6 +309,7 @@ function renderSummary() {
       ? "仅规划推荐；运行期顾问配额为 0"
       : "规划推荐 + 实测反馈；顾问不可用时降级规则选点")
     : "仅规划推荐；搜索阶段不调用（Strict 智能调优计划）";
+  if (isTune && planMeta.capability_analysis) advisorParticipation = "镜像能力分析 + " + advisorParticipation;
   var code = detail.code_state || {};
   var rows = (detail.results_index && detail.results_index.rows) || [];
   var validRows = rows.filter(function(row) { return row.status === "VALID"; });
@@ -353,7 +354,67 @@ function renderSummary() {
     ["代码指纹一致", code.matches],
     ["当前代码 fingerprint", code.current_bundle_fingerprint]
   ]);
+  renderImageCapabilities(detail, planMeta);
   renderAdaptiveDecisions(detail.adaptive_decisions || [], strategy);
+}
+
+function renderImageCapabilities(detail, metadata) {
+  var box = el("image-capabilities");
+  if (!box) return;
+  var catalog = metadata.engine_catalog;
+  box.hidden = !catalog;
+  if (!catalog) return;
+  var parameters = Object.values(catalog.parameters || {});
+  var integrated = parameters.filter(function(item) { return item.integrated; });
+  var analysis = detail.capability_analysis || metadata.capability_analysis;
+  var preflight = detail.native_preflight || metadata.native_preflight || {};
+  var results = preflight.results || [];
+  var rounds = (analysis && analysis.rounds) || [];
+  var requests = rounds.reduce(function(total, round) {
+    return total + ((round.request_attempts || {}).request_count || 0);
+  }, 0);
+  var html = '<h3>镜像原生能力（' + escapeHtml(catalog.engine) + '）</h3>';
+  html += renderKV([
+    ["已发现 / 已接入参数", parameters.length + " / " + integrated.length],
+    ["能力顾问", analysis ? analysis.status + "；逻辑轮次 " + rounds.length + "；实际 HTTP 请求 " + requests : "未调用（AUTO 或旧计划）"],
+    ["独立分析预算", analysis ? (analysis.budget || {}).max_rounds + " 轮 / " + (analysis.budget || {}).timeout_seconds + " 秒；不占反馈配额" : "不适用"],
+    ["原生解析预检", preflight.status || "未记录"],
+    ["解析通过 / 拒绝 / 未知", results.filter(function(row) { return row.status === "preflight_passed"; }).length + " / " +
+      results.filter(function(row) { return row.status === "parser_rejected"; }).length + " / " +
+      results.filter(function(row) { return row.status === "unknown"; }).length],
+    ["最终参与候选的原生维度", metadata.feature_knobs || {}]
+  ]);
+  html += '<p class="hint">已发现不代表已接入，未接入不代表引擎不支持；解析通过不代表模型/GPU 可用。这里显示规划证据，实际生效参数以 Trial 的 server.info.json 为准。</p>';
+  if (preflight.reason) html += '<p class="hint">预检说明：' + escapeHtml(preflight.reason) + '</p>';
+  if (analysis) {
+    var findings = [
+      ["顾问功能建议（仍待实测）", analysis.features], ["顾问组合对照建议", analysis.experiments],
+      ["性能假设", analysis.hypotheses], ["待确认", analysis.unknowns],
+      ["建议校验拒绝", analysis.rejections], ["用户限制过滤", metadata.feature_restrictions]
+    ];
+    findings.forEach(function(item) {
+      if (item[1] && item[1].length) html += '<details><summary>' + escapeHtml(item[0]) + '</summary><pre>' +
+        escapeHtml(JSON.stringify(item[1], null, 2)) + '</pre></details>';
+    });
+    html += '<details><summary>能力分析轮次</summary>' + renderKV(rounds.map(function(round) {
+      var attempt = round.request_attempts || {};
+      return ["第 " + round.round + " 轮", round.status + "；HTTP " + (attempt.request_count || 0) +
+        (attempt.winner != null ? "；采用第 " + attempt.winner + " 次返回" : "") + (round.reason ? "；" + round.reason : "")];
+    })) + '</details>';
+  }
+  html += '<div class="button-row compact">';
+  ["engine-capabilities.json", "capability-analysis.json", "native-preflight.json"].forEach(function(path) {
+    if (path !== "capability-analysis.json" || analysis) html += '<button data-capability-artifact="' + path + '">' + path + '</button>';
+  });
+  box.innerHTML = html + '</div>';
+  box.querySelectorAll("button[data-capability-artifact]").forEach(function(button) {
+    button.addEventListener("click", function() {
+      state.selectedTrial = null;
+      el("artifact-title").textContent = "镜像能力证据";
+      setActiveTab("artifacts");
+      loadArtifact(button.dataset.capabilityArtifact).catch(showError);
+    });
+  });
 }
 
 function renderAdaptiveDecisions(rows, strategy) {
@@ -395,8 +456,11 @@ function renderCandidates() {
     return;
   }
   box.className = "table-wrap";
+  var isVllm = rows[0].engine === "vllm";
   var html = '<table><thead><tr>';
-  ["candidate", "状态", "拓扑", "GPU", "TP/DP/PP", "DPA", "backend", "DSpark", "对照组", "功能组合", "显存参数", "批处理参数", "当前最佳 trial"].forEach(function(name) {
+  ["candidate", "状态", "拓扑", "GPU", "TP/DP/PP"].concat(isVllm
+    ? ["Expert Parallel", "MoE / All2All", "speculative_config"] : ["Attention DP", "MoE runner / A2A", "原生投机参数"]
+  ).concat(["解析预检", "对照组", "功能组合", "显存参数", "批处理参数", "当前最佳 trial"]).forEach(function(name) {
     html += "<th>" + escapeHtml(name) + "</th>";
   });
   html += "</tr></thead><tbody>";
@@ -407,9 +471,16 @@ function renderCandidates() {
     html += "<td>" + escapeHtml(c.deployment_label || "-") + '<div class="small">' + pretty(c.instance_count) + " inst · " + pretty(c.gpus_per_instance) + " gpu/inst</div></td>";
     html += "<td>" + escapeHtml(pretty(c.gpu_indexes)) + "</td>";
     html += "<td>" + pretty(c.tp) + " / " + pretty(c.dp) + " / " + pretty(c.pp) + "</td>";
-    html += "<td>" + pretty(c.dp_attention) + "</td>";
-    html += "<td>" + escapeHtml(pretty(c.backend)) + "</td>";
-    html += "<td>" + pretty(c.dspark) + "</td>";
+    var native = c.native_features || {};
+    var speculation = {};
+    Object.keys(native).filter(function(key) { return key.indexOf("speculative_") === 0; }).forEach(function(key) {
+      speculation[key] = native[key];
+    });
+    html += "<td>" + escapeHtml(pretty(isVllm ? native.enable_expert_parallel : c.attn_dp_size != null ? c.attn_dp_size : c.dp_attention)) + "</td>";
+    html += "<td>" + escapeHtml(isVllm ? pretty(native.moe_backend || c.backend) + " / " + pretty(native.all2all_backend)
+      : pretty(native.moe_runner_backend || c.backend) + " / " + pretty(native.moe_a2a_backend || c.moe_a2a_backend)) + "</td>";
+    html += "<td>" + escapeHtml(pretty(isVllm ? native.speculative_config : Object.keys(speculation).length ? speculation : { dspark: c.dspark })) + "</td>";
+    html += "<td>" + escapeHtml(({ preflight_passed: "解析通过（待实测）", parser_rejected: "解析拒绝", unknown: "未知" })[(c.native_preflight || {}).status] || "未记录") + "</td>";
     html += "<td class=\"code\">" + escapeHtml(c.comparison_group || "-") + "</td>";
     html += "<td>" + escapeHtml(c.feature_variant || "-") + "</td>";
     html += "<td>" + pretty(c.engine === "vllm" ? c.gpu_memory_utilization : c.mem_fraction_static) + "</td>";
@@ -479,7 +550,7 @@ async function openCandidate(candidateId) {
     ["tool parser", detail.metadata && detail.metadata.tool_call_parser],
     ["reasoning parser", detail.metadata && detail.metadata.reasoning_parser]
   ]);
-  html += '<div class="kv" style="grid-column:1/-1"><div class="key">预计 SGLang 命令</div><pre>' + escapeHtml(command) + "</pre></div>";
+  html += '<div class="kv" style="grid-column:1/-1"><div class="key">预计 ' + escapeHtml((detail.metadata && detail.metadata.engine) || "sglang") + ' 命令</div><pre>' + escapeHtml(command) + "</pre></div>";
   html += '<div class="kv" style="grid-column:1/-1"><div class="key">规划 static_config</div><pre>' + escapeHtml(JSON.stringify(detail.static_config || {}, null, 2)) + "</pre></div>";
   html += '<div class="kv" style="grid-column:1/-1"><div class="key">预计 requested parameters</div><pre>' + escapeHtml(JSON.stringify((detail.launch_preview && detail.launch_preview.requested_parameters) || {}, null, 2)) + "</pre></div>";
   el("candidate-detail").innerHTML = html;

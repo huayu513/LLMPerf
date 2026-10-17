@@ -186,7 +186,9 @@ def server_info_leaves(server_info: dict[str, Any]) -> dict[str, Any]:
 
 def values_match(key: str, expected: Any, actual: Any) -> bool:
     if key == "speculative_config":
-        return normalized_speculation(expected) == normalized_speculation(actual)
+        expected, actual = normalized_speculation(expected), normalized_speculation(actual)
+        return (all(actual.get(name) == value for name, value in expected.items())
+                if isinstance(expected, dict) and isinstance(actual, dict) else expected == actual)
     if key in {"backend", "moe_a2a_backend"} and isinstance(expected, str) and expected.lower() == "auto":
         unresolved = {"", "auto"} if key == "moe_a2a_backend" else {"", "auto", "none"}
         return actual is not None and str(actual).strip().lower() not in unresolved

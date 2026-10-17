@@ -16,6 +16,11 @@ def vllm_plan_settings(config, model, capabilities):
     }
     native.update({key: value for key, value in getattr(config, "engine_options", {}).items()
                    if key not in {"tensor_parallel_size", "data_parallel_size", "pipeline_parallel_size"}})
+    discovered = capabilities.get("schema", {}).get("parameters", {})
+    if "enable_expert_parallel" not in getattr(config, "engine_options", {}):
+        default = discovered.get("enable_expert_parallel", {}).get("default")
+        if type(default) is bool:
+            native["enable_expert_parallel"] = default
     if native["max_num_batched_tokens"] < native["max_num_seqs"]:
         raise ConfigError("vLLM max_num_batched_tokens must be >= max_num_seqs")
     required = {"--served-model-name", "--tensor-parallel-size", "--data-parallel-size",
@@ -57,4 +62,9 @@ def vllm_plan_settings(config, model, capabilities):
     missing = sorted(required - options)
     if missing:
         raise ConfigError("configured image lacks required vLLM launch options: " + ", ".join(missing))
+    negative_flags = {name: next(flag for flag in item["flags"] if flag.startswith("--no-"))
+                      for name, item in discovered.items() if item.get("type") == "boolean"
+                      and any(flag.startswith("--no-") for flag in item["flags"])}
+    if negative_flags:
+        native["native_boolean_flags"] = negative_flags
     return native, [None if value == "auto" else value for value in backends], parsers

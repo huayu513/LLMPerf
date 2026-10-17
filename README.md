@@ -4,14 +4,14 @@
 
 ## 场景驱动智能调优（新模式）
 
-原来的 `auto` 保持原样。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算，默认回放 `input_path` 的原始 JSONL；只有显式选择合成负载时才可以省略 `input_path`。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
+`auto` 保留不调用大模型的规则搜索入口，镜像能力探测和原生功能对照与智能调优同步升级。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算，默认回放 `input_path` 的原始 JSONL；只有显式选择合成负载时才可以省略 `input_path`。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
 
 Web 按入口选择模式，不需要业务人员配置 `strategy`：
 
 | 入口 | 搜索策略 | 大模型参与 |
 | --- | --- | --- |
 | 生成 Auto 计划 → 开始搜索 | `strict`，原有规则流程 | 不调用 |
-| 生成智能调优计划 → 开始搜索 | `adaptive`，实测反馈驱动 | 场景解析、规划推荐、搜索过程中的结果分析与下一批选点 |
+| 生成智能调优计划 → 开始搜索 | `adaptive`，实测反馈驱动 | 场景解析、镜像能力分析、规划推荐、搜索过程中的结果分析与下一批选点 |
 
 两个入口可以使用同一份配置；Web 智能调优明确选择 `adaptive`，AUTO 明确选择 `strict`。运行已保存计划时，以计划中的策略为准，不因当前页面或配置改变而切换。
 
@@ -25,6 +25,7 @@ Web 按入口选择模式，不需要业务人员配置 `strategy`：
   "reasoning_effort": "max",
   "task_max_tokens": {
     "scene": 100000,
+    "capabilities": 100000,
     "candidates": 100000,
     "explain": 100000,
     "next_experiments": 100000
@@ -45,6 +46,8 @@ python3 benchctl.py tune-plan --config configs/experiment.json
 顾问采用错峰并发请求：本轮第 0、500、1000、1500 秒各发送一次相同任务，最多四次；旧请求继续等待，首个完整且通过任务校验的结果胜出。HTTP 错误、非法 JSON 和无效场景/候选不能抢占有效结果。收到有效结果后停止追加、尽力关闭其余连接，晚到结果不再应用；服务端不一定随连接关闭停止生成，因此最多可能产生四份推理负载。整轮按单调时钟计时，最多 2000 秒，较短的配置超时或剩余探索预算会缩短窗口，不会为凑齐四次而延长。若所有可发送请求已明确失败，则提前记录失败；仅到截止时间仍未完成时记录超时。运行期无有效结果仍按原逻辑降级规则选点，不将未运行候选判为失败。
 
 `search.adaptive.max_advisor_calls` 继续限制反馈顾问轮次，一轮可能包含最多四次实际 HTTP 请求，并非只消耗一次模型推理。标准错误日志输出 `advisor_request_started`、`advisor_request_finished`、`advisor_call_finished`，记录发送时间、各次状态、实际请求数和采用序号，不输出认证或业务请求正文。规划记录和反馈决策的 `request_attempts` 保存同样的审计信息；Web 反馈决策显示实际请求次数和采用第几次返回。已接受的旧决策在 Resume 时仍复用，不会重新请求。
+
+镜像能力分析是候选推荐前的独立阶段，SGLang 与 vLLM 同时支持，最多 3 个逻辑轮次，共享最多 2000 秒（配置更短时使用更短值），不占 `search.adaptive.max_advisor_calls` 的反馈配额。该阶段沿用顾问思考设置；输出预算优先使用 `advisor.task_max_tokens.capabilities`，未配置时沿用 `candidates`，二者都未配置时为 8192。顾问只能补读已经采集的只读证据 ID，不能执行任意命令。完整流程、能力边界与产物见 [镜像原生能力驱动调优](docs/image-native-tuning.md)。
 
 模型只提取明确指定的字段；省略或“其他默认”的字段由平台确定，不追问缺项，只追问明确要求中的歧义。默认输入保留原始 `messages`，不截断、不填充；默认输出保留原请求的 `max_tokens` / `max_completion_tokens`，原请求没有上限就不新增，沿用服务端默认值和上下文限制。场景快照中 `max_input_tokens` / `max_output_tokens: null` 表示不添加场景上限。默认目标为 `throughput`；默认并发优先使用 `search.start_concurrency`，否则按配置 GPU 数每卡 8 并发估算（未指定 GPU 时按一张卡保守估算），且不超过 `search.concurrency_max`。缺少 `input_path` 会报错，不静默切换合成负载。
 
@@ -125,9 +128,9 @@ python3 benchctl.py auto --config configs/experiment.vllm.json
 - `max_num_seqs`：默认 `search.concurrency_max`，每个 trial 按单实例分到的并发收紧；不是客户端总并发的同义词。
 - `max_num_batched_tokens`：默认 4096，表示迭代 token 预算，不等同于 SGLang 的 chunked-prefill-size。
 - `max_model_len`：默认不设置，不传 `--max-model-len`，由引擎读取模型配置；只有显式配置时才覆盖。不会自动改为 `auto`、固定 32K 或按请求长度估算。默认上下文导致显存不足时明确报错，不缩短业务请求。
-- `enforce_eager`、`enable_expert_parallel`：默认关闭。EP 和通信策略仅按显式配置启用，不映射 SGLang DP Attention。
+- `enforce_eager`：默认关闭。`enable_expert_parallel`：基线优先采用镜像解析器公开的布尔默认值，未知时维持关闭；原生功能对照可尝试镜像公开的 EP 开关及通信策略，但不覆盖显式 `engine_options`，也不映射成 SGLang DP Attention。
 - `moe_backend`、`all2all_backend`：可选原生参数，要求镜像广告相应 CLI。`search.backends` 在 vLLM 下表示原生 MoE backend，与 `moe_backend` 不能同时配置；默认交给引擎 AUTO，不调用 SGLang 的解析或去重流程。
-- `speculative_config`：默认不启用；可显式配置 `{"method":"deepseek_mtp","num_speculative_tokens":5}`，需对应 backport 版本支持。不把 SGLang DSpark 直接映射成 vLLM 投机解码。
+- `speculative_config`：基线默认不启用；可显式配置 `{"method":"deepseek_mtp","num_speculative_tokens":5}`，需对应 backport 版本支持。未显式限定时，可按镜像实际结构和顾问建议生成原生方法对照；不把 SGLang DSpark 直接映射成 vLLM 投机解码。
 
 DeepSeek-V4 的自动工具/推理 parser 映射为 vLLM 的 `deepseek_v4`。显式 `model_overrides` 的 parser 名称优先。镜像必须支持默认聊天模板 kwargs，原始回放请求不做额外改写；请求自身的模板参数仍由服务端合并处理。其他模型若 parser 不兼容，需指定该镜像支持的原生 parser。
 
@@ -299,7 +302,7 @@ python3 -m web.server --host 0.0.0.0 --port 18080
 
 1. 修改 `configs/experiment.json`，至少确认 `model_path`、`input_path`、`image`、`gpu_indexes` 和 `output_dir`。
 2. 在前端点击“生成计划”。这一步执行 `python3 benchctl.py plan --config ...`，只创建 result 目录和 `plan.json`，不会开始压测。
-3. 在“候选规划”页检查每个 candidate。点进 candidate 可以看拓扑、GPU 分配、TP/DP/PP、DP Attention、MoE backend、DSpark、内存比例、chunked prefill，以及预计传给 SGLang 的启动参数。
+3. 在“运行概览 → 镜像原生能力”查看顾问分析、独立调用轮次、未知项和解析预检，并打开证据 JSON。在“候选规划”检查拓扑和引擎原生参数：SGLang 显示 Attention DP、MoE runner/A2A 与投机参数；vLLM 显示 Expert Parallel、MoE/All2All 与 `speculative_config`，不显示虚假的 DPA/DSpark 关闭项。双击 candidate 查看对应引擎的启动参数预览。
 4. 确认计划后点击“开始搜索”。这一步执行 `python3 benchctl.py run --plan <result-dir>/plan.json`。
 5. 运行过程中可以在 Jobs 页看当前后台命令、stdout 事件和最新输出；在 Trials 页看每个 trial 的状态、吞吐和失败原因；点进 trial 或 candidate 的 artifact 可以看 `server.log`、`docker.log`、`server.command.sh`、`server.reproduce.sh`、`server.evidence.json`、`server.info.json` 和 `*.summary.json`。这些文件位于 replay 输出目录（例如 `trials/<task>/attempt-001/formal/AUTO/.../run_001/`），不一定直接位于 `attempt-001/` 根目录。其中 `server.command.sh` 是容器内真实 SGLang 命令；`server.reproduce.sh` 已把命令嵌入脚本，可以复制到另一台具备相同 Docker 镜像、宿主机模型路径、足够数量的兼容 GPU 和可用端口的服务器后，用 `bash server.reproduce.sh` 单独启动 server，不需要原始 JSONL、replay index 或 benchmark 目录。脚本按 GPU 数量申请设备，不绑定原服务器的物理 GPU 编号。多实例结果还会在 `instances/<id>/` 下保留每个实例的命令快照；应使用和 `server.evidence.json` 同目录的聚合脚本。
 6. 如果需要暂停当前搜索或 resume，在 Jobs 页选中正在运行的任务，点击“停止选中任务”。这会向当前 `benchctl.py` 子进程发送中断信号；已经完成并写入的 trial 会保留，之后继续点击“严格 Resume”。

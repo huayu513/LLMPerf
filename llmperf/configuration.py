@@ -304,7 +304,7 @@ def validate_advisor(value: Any) -> dict[str, Any]:
     if not valid:
         raise ConfigError("advisor.base_url must be an HTTP(S) endpoint without credentials or query")
     budgets = _object(data.get("task_max_tokens", {}), "advisor.task_max_tokens")
-    _unknown(budgets, {"scene", "candidates", "explain", "next_experiments"}, "advisor.task_max_tokens")
+    _unknown(budgets, {"scene", "capabilities", "candidates", "explain", "next_experiments"}, "advisor.task_max_tokens")
     thinking = _boolean(data.get("thinking", False), "advisor.thinking")
     effort = _string(data.get("reasoning_effort", "max" if thinking else "none"), "advisor.reasoning_effort")
     if effort not in {"none", "high", "max"} or thinking == (effort == "none"):

@@ -40,6 +40,8 @@ def launch_config(metadata: dict, static: dict, max_num_seqs: int) -> dict:
         "max_num_seqs": max_num_seqs,
         "chat_template_kwargs": metadata.get("chat_template_kwargs", {}),
     })
+    if static.get("native_boolean_flags"):
+        config["native_boolean_flags"] = static["native_boolean_flags"]
     for key in ("tool_call_parser", "reasoning_parser", "quantization"):
         if metadata.get(key):
             config[key] = metadata[key]
@@ -66,6 +68,8 @@ def command_args(config: dict, port: int, executable: str = "vllm") -> list[str]
         if isinstance(value, bool):
             if value:
                 command.append(flag)
+            elif config.get("native_boolean_flags", {}).get(key):
+                command.append(config["native_boolean_flags"][key])
         else:
             command += [flag, json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value)]
     if config.get("tool_call_parser"):
@@ -92,8 +96,8 @@ def server_parameters(info: dict) -> dict:
     if "speculative_config" in config:
         spec = config["speculative_config"]
         if isinstance(spec, dict):
-            values["speculative_config"] = {
-                key: spec[key] for key in ("method", "num_speculative_tokens") if key in spec}
+            values["speculative_config"] = {key: value for key, value in spec.items()
+                                            if value is None or type(value) in (str, int, float, bool)}
         else:
             values["speculative_config"] = spec
     return values

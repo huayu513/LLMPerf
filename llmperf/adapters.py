@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE, deployment_service_ports
 from .errors import ConfigError
+from .feature_catalog import native_contract
 from .types import DockerConfig, PlanTask
 from benchmarks.server.vllm_config import launch_config, normalized_speculation, requested_parameters, server_parameters
 
@@ -240,7 +241,9 @@ def _server_info_leaves(value: Any) -> dict[str, Any]:
 
 def _values_match(key: str, expected: Any, actual: Any) -> bool:
     if key == "speculative_config":
-        return normalized_speculation(expected) == normalized_speculation(actual)
+        expected, actual = normalized_speculation(expected), normalized_speculation(actual)
+        return (all(actual.get(name) == value for name, value in expected.items())
+                if isinstance(expected, dict) and isinstance(actual, dict) else expected == actual)
     if key in {"backend", "moe_a2a_backend"} and isinstance(expected, str) and expected.lower() == "auto":
         unresolved = {"", "auto"} if key == "moe_a2a_backend" else {"", "auto", "none"}
         return actual is not None and str(actual).strip().lower() not in unresolved
@@ -445,6 +448,12 @@ def _expected_requested_parameters(metadata: Mapping[str, Any], task: PlanTask) 
         value = static.get(key, candidate.get(key))
         if value is not None:
             expected[key] = value
+    catalog = metadata.get("engine_catalog")
+    if catalog:
+        contract = native_contract(static, catalog)
+        for key in contract["drop_requested"]:
+            expected.pop(key, None)
+        expected.update(contract["requested"])
     if is_moe:
         expected["backend"] = static.get("backend") or "auto"
         expected["moe_a2a_backend"] = static.get("moe_a2a_backend") or "auto"
@@ -575,6 +584,7 @@ class ReplayAdapter:
         if not isinstance(profile_env, Mapping):
             raise ValueError("profile_env must be an object")
         reserved_profile_keys = set(env) | {
+            "S1_SGLANG_NATIVE",
             "TP_SIZE", "DP_SIZE", "PP_SIZE", "ENABLE_DP_ATTENTION",
             "ENABLE_DP_LM_HEAD", "ENABLE_DSPARK", "MOE_RUNNER_BACKEND",
             "MOE_A2A_BACKEND", "MEM_FRACTION_STATIC", "MAX_RUNNING_REQUESTS",
@@ -602,6 +612,10 @@ class ReplayAdapter:
                     value = int(bool(value))
                 env[target] = str(value)
         env["MAX_RUNNING_REQUESTS"] = str(_effective_max_running_requests(task, static))
+        if self.metadata.get("engine", "sglang") == "sglang" and self.metadata.get("engine_catalog"):
+            env["S1_SGLANG_NATIVE"] = json.dumps(native_contract(static, self.metadata["engine_catalog"]), sort_keys=True)
+            if "speculative_algorithm" in static:
+                env["ENABLE_DSPARK"] = "0"
         logical_gpu_count = len(gpu_indexes) if gpu_indexes else 1
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in range(logical_gpu_count))
         if self.metadata.get("engine") == "vllm":

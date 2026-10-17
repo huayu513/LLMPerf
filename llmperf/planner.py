@@ -11,6 +11,7 @@ from .artifacts import write_json_atomic
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE
 from .errors import ConfigError
 from .engines import vllm_plan_settings
+from .feature_catalog import engine_catalog
 from .types import CandidateConfig, Plan, PlanTask
 
 
@@ -141,6 +142,10 @@ def create_search_plan(config, model, workload, env, result_dir):
     if engine not in {'sglang', 'vllm'}:
         raise ConfigError(f'unsupported engine: {engine}')
     options = set(caps.get('options', []))
+    catalog = engine_catalog(engine, caps)
+    catalog['identity'] = {'image': config.image,
+        'image_snapshot': env.image.to_dict() if hasattr(env.image, 'to_dict') else dict(env.image),
+        'versions': env.container.get('versions', {})}
     if engine == 'vllm':
         native, vllm_backends, parsers = vllm_plan_settings(config, model, caps)
     else:
@@ -161,7 +166,10 @@ def create_search_plan(config, model, workload, env, result_dir):
         required.add('--quantization')
     if model.raw.get('is_moe'):
         required.update(('--moe-runner-backend', '--moe-a2a-backend'))
-    missing = sorted(required - options) if engine == 'sglang' else []
+    compatible = set(options)
+    if '--dp-size' in options:
+        compatible.add('--dp')
+    missing = sorted(required - compatible) if engine == 'sglang' else []
     if missing:
         raise ConfigError('configured image lacks required SGLang launch options: ' + ', '.join(missing))
     for parser, key in ((model.tool_call_parser, 'tool_parsers'), (model.reasoning_parser, 'reasoning_parsers')):
@@ -192,9 +200,11 @@ def create_search_plan(config, model, workload, env, result_dir):
     backends = list(dict.fromkeys(backends))
     heads = model.raw.get('num_attention_heads')
     layers = model.raw.get('num_hidden_layers')
-    dpa_supported = engine == 'sglang' and is_moe and {'--enable-dp-attention', '--enable-dp-lm-head'} <= options
-    dspark_supported = (engine == 'sglang' and model.raw.get('model_type') == 'deepseek_v4' and
+    dpa_supported = engine == 'sglang' and bool({'--enable-dp-attention', '--attn-dp-size'} & options)
+    dspark_supported = (engine == 'sglang' and
+                        caps.get('schema', {}).get('status') != 'discovered' and
                         {'--speculative-algorithm', '--speculative-dspark-block-size'} <= options)
+    a2a_default = catalog['parameters'].get('moe_a2a_backend', {}).get('default')
     candidates = []
     for gpu_group in groups:
         for deployment in _deployment_layouts(gpu_group):
@@ -222,7 +232,7 @@ def create_search_plan(config, model, workload, env, result_dir):
                             ):
                                 continue
                             for backend in backends:
-                                for dspark in ([False, True] if dspark_supported and pp == 1 else [False]):
+                                for dspark in ([False, True] if dspark_supported else [False]):
                                     static = dict(tp=tp, dp=actual_dp, pp=pp, dp_attention=dpa,
                                         dp_lm_head=dpa, backend=backend, dspark=dspark,
                                         world_size=world, gpu_indexes=deployment['gpu_indexes'],
@@ -242,7 +252,8 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         feature_variant=(
                                             "dp_attention" if dpa else "baseline"
                                         ) + ("+dspark" if dspark else ""),
-                                        moe_a2a_backend='none' if is_moe else None,
+                                        moe_a2a_backend=(a2a_default if isinstance(a2a_default, str) and a2a_default
+                                                         else 'none') if is_moe else None,
                                         mem_fraction_static=0.85, max_running_requests=config.search.concurrency_max,
                                         chunked_prefill_size=8192)
                                     if engine == 'vllm':
@@ -252,13 +263,22 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         static.update(native, engine='vllm')
                                         if backend is not None:
                                             static['moe_backend'] = backend
+                                    elif dpa and '--attn-dp-size' in options:
+                                        static.update(attn_dp_size=actual_dp, dp=1)
+                                        if '--enable-dp-lm-head' not in options:
+                                            static['dp_lm_head'] = False
+                                    if engine == 'sglang' and caps.get('schema', {}).get('status') == 'discovered':
+                                        algorithm = catalog['parameters'].get('speculative_algorithm', {}).get('default')
+                                        if isinstance(algorithm, str) and algorithm:
+                                            static.update(speculative_algorithm=algorithm,
+                                                          dspark=algorithm.upper() == 'DSPARK')
                                     digest = fingerprint(static)
                                     ident = (
                                         f"{deployment['ascii_label']}-tp{tp}-dp{actual_dp}-pp{pp}-"
                                         f'a{int(dpa)}-{backend or "auto"}-ds{int(dspark)}-{digest[:8]}'
                                     )
-                                    candidates.append(CandidateConfig(ident, tp, actual_dp, pp, dpa, backend,
-                                        dspark, tuple(deployment['gpu_indexes']), 'CANDIDATE', (), static, digest))
+                                    candidates.append(CandidateConfig(ident, tp, static['dp'], pp, dpa, backend,
+                                        static.get('dspark', dspark), tuple(deployment['gpu_indexes']), 'CANDIDATE', (), static, digest))
     if not candidates:
         raise ConfigError('no candidate fits the selected GPUs and model metadata')
     candidates.sort(key=lambda c: (
@@ -305,6 +325,7 @@ def create_search_plan(config, model, workload, env, result_dir):
         service_port_stride=DEPLOYMENT_PORT_STRIDE,
         shm_size=config.docker.shm_size, ipc=config.docker.ipc,
         candidates={c.id: asdict(c) for c in candidates},
+        engine_catalog=catalog,
         comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',
         search_scope=('homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP; '

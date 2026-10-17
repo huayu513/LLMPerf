@@ -46,7 +46,7 @@
         <button id="tune-run" title="使用大模型规划，并在搜索过程中分析实测结果">生成智能调优计划</button>
       </div>
       <p id="scenario-response" class="hint">可只指定部分要求，其余写“默认”。默认保留原始输入和输出参数，原请求没设输出上限时不新增；只有明确要求有歧义时才追问。生成计划后点击“开始搜索”才会实测。</p>
-      <p class="hint">生成 Auto 计划：规则搜索，不调用大模型。生成智能调优计划：自动使用 Adaptive，大模型参与规划和实测反馈，无需配置 strategy；顾问不可用时降级规则选点。生成计划不会直接跑压测，旧计划按已保存策略执行。</p>
+      <p class="hint">生成 Auto 计划：按镜像证据做规则搜索，不调用大模型。生成智能调优计划：大模型先分析镜像原生能力、建议功能对照，再推荐候选，并在 Adaptive 搜索中分析实测反馈。镜像分析和原生解析预检可在运行概览查看；解析通过不等于 GPU 运行通过。生成计划不会直接跑压测，旧计划按已保存策略执行。</p>
       <p class="hint">默认结果目录是 /data/hjh/LLMPerf/results。选中计划后点击“开始搜索”；智能调优先测基线，再根据每批实测结果调用大模型，在“反馈决策”中查看分析与下一批建议。</p>
     </section>
 
@@ -71,6 +71,7 @@
             </div>
           </div>
           <div id="summary-content" class="empty">请选择一个 run。</div>
+          <div id="image-capabilities" hidden></div>
           <div id="adaptive-decisions" hidden></div>
         </section>
 
