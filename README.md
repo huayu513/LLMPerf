@@ -49,6 +49,8 @@ python3 benchctl.py tune-plan --config configs/experiment.json
 
 镜像能力分析是候选推荐前的独立阶段，SGLang 与 vLLM 同时支持，最多 3 个逻辑轮次，共享最多 2000 秒（配置更短时使用更短值），不占 `search.adaptive.max_advisor_calls` 的反馈配额。该阶段沿用顾问思考设置；输出预算优先使用 `advisor.task_max_tokens.capabilities`，未配置时沿用 `candidates`，二者都未配置时为 8192。顾问只能补读已经采集的只读证据 ID，不能执行任意命令。完整流程、能力边界与产物见 [镜像原生能力驱动调优](docs/image-native-tuning.md)。
 
+能力顾问的 TP/DP/PP 建议通过既有合法拓扑候选选择生效，不直接改写 GPU 分配。原生解析预检先不暴露 GPU，只有实际设备识别异常才补充选定 GPU 上下文重试，不加载权重或启动服务；全未知明确显示未知，不冒充解析完成。Web 的“顾问建议落地”和“原生解析预检诊断”分别展示建议最终匹配的候选、设备上下文与失败原因。
+
 模型只提取明确指定的字段；省略或“其他默认”的字段由平台确定，不追问缺项，只追问明确要求中的歧义。默认输入保留原始 `messages`，不截断、不填充；默认输出保留原请求的 `max_tokens` / `max_completion_tokens`，原请求没有上限就不新增，沿用服务端默认值和上下文限制。场景快照中 `max_input_tokens` / `max_output_tokens: null` 表示不添加场景上限。默认目标为 `throughput`；默认并发优先使用 `search.start_concurrency`，否则按配置 GPU 数每卡 8 并发估算（未指定 GPU 时按一张卡保守估算），且不超过 `search.concurrency_max`。缺少 `input_path` 会报错，不静默切换合成负载。
 
 明确指定输出上限时，仅在发送请求时收紧原有生成限制；原上限更小时保留原值，没有上限时增加 `max_tokens`。源 JSONL 不修改，结果记录原始和实际发送请求的哈希及输出限制。明确指定输入上限只核验实际 usage，不自动截断或补齐。实际输入/输出超过指定上限或 usage 缺失的试验不能参与选优。
