@@ -43,6 +43,8 @@ from llmperf.artifacts import write_json_atomic  # noqa: E402
 from llmperf.advisor import extract_and_save_scenario  # noqa: E402
 from llmperf.docker_runtime import DockerRuntime  # noqa: E402
 from llmperf.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
+from llmperf.feature_catalog import native_contract, native_summary  # noqa: E402
+from benchmarks.server.native_args import transform
 from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters
 from llmperf.search import (  # noqa: E402
     _candidate_gpu_count,
@@ -211,6 +213,7 @@ def candidate_static(candidate: dict[str, Any]) -> dict[str, Any]:
 def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
     plan = json_load(run_dir / "plan.json", {})
     metadata = plan.get("metadata", {}) if isinstance(plan, dict) else {}
+    preflights = {row["id"]: row for row in metadata.get("native_preflight", {}).get("results", [])}
     raw_candidates = plan.get("candidates", []) if isinstance(plan, dict) else []
     rows_doc = json_load(run_dir / "results-index.json", {})
     rows = rows_doc.get("rows", []) if isinstance(rows_doc, dict) else []
@@ -257,6 +260,9 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
             "backend": candidate.get("backend", static.get("backend")) or "auto",
             "moe_a2a_backend": static.get("moe_a2a_backend"),
             "dspark": candidate.get("dspark", static.get("dspark")),
+            "attn_dp_size": static.get("attn_dp_size"),
+            "native_features": native_summary(static),
+            "native_preflight": preflights.get(candidate.get("id"), {"status": "unknown"}),
             "gpu_indexes": candidate.get("gpu_indexes", static.get("gpu_indexes", [])),
             "deployment_label": deployment.get("label"),
             "instance_count": deployment.get("instance_count"),
@@ -491,6 +497,12 @@ def preview_launch(metadata: dict[str, Any], candidate: dict[str, Any], concurre
         flags.append("--enable-dp-lm-head")
     if params.get("dspark"):
         flags += ["--speculative-algorithm", "DSPARK"]
+    if metadata.get("engine_catalog"):
+        contract = native_contract(static, metadata["engine_catalog"])
+        flags = transform(flags, contract)
+        for key in contract["drop_requested"]:
+            params.pop(key, None)
+        params.update(contract["requested"])
     return {
         "concurrency": concurrency,
         "instance_count": instance_count,
@@ -1789,6 +1801,8 @@ def run_detail(run_dir: Path) -> dict[str, Any]:
         "adaptive_decisions": adaptive_decisions(run_dir),
         "scenario": json_load(run_dir / "scenario.json", None),
         "catalog": json_load(run_dir / "catalog.json", None),
+        "capability_analysis": json_load(run_dir / "capability-analysis.json", None),
+        "native_preflight": json_load(run_dir / "native-preflight.json", None),
         "results_index": json_load(run_dir / "results-index.json", None),
         "leaderboard": json_load(run_dir / "leaderboard.json", None),
         "best_so_far": json_load(run_dir / "best-so-far.json", None),
