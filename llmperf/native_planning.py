@@ -63,6 +63,7 @@ def feature_controls(plan, catalog, knobs, limit, experiments=()):
     seen = {identity(candidate.static_config) for candidate in bases}
     existing = {identity(candidate.static_config): candidate for candidate in bases}
     promoted = {}
+    preferred = {}
     rejections = []
     attempts = 0
     proposals = [row["params"] for row in sorted(experiments, key=lambda item: item.get("priority", 0), reverse=True)]
@@ -97,6 +98,7 @@ def feature_controls(plan, catalog, knobs, limit, experiments=()):
             if key in seen:
                 if has_topology and key in existing:
                     promoted[existing[key].id] = existing[key]
+                    preferred[existing[key].id] = existing[key]
                 continue
             seen.add(key)
             static["feature_variant"] = json.dumps(native_summary(static), ensure_ascii=False, sort_keys=True)
@@ -104,12 +106,13 @@ def feature_controls(plan, catalog, knobs, limit, experiments=()):
             variants.append(replace(base, id="native-" + digest[:16], static_config=static,
                 backend=static.get("backend", base.backend), dspark=static.get("dspark", base.dspark),
                 config_hash=digest, reasons=("镜像证据与顾问建议；待运行验证",)))
+            preferred[variants[-1].id] = variants[-1]
             if len(variants) >= limit:
                 break
         if len(variants) >= limit:
             break
-    ordered = bases[:1] + [candidate for candidate in promoted.values() if candidate.id != bases[0].id]
-    ordered += variants + [candidate for candidate in bases[1:] if candidate.id not in promoted]
+    ordered = bases[:1] + [candidate for candidate in preferred.values() if candidate.id != bases[0].id]
+    ordered += [candidate for candidate in bases[1:] if candidate.id not in preferred]
     metadata = {**plan.metadata, "candidates": {candidate.id: asdict(candidate) for candidate in ordered}}
     metadata["native_generation"] = {"attempts": attempts, "created": len(variants),
         "promoted_topologies": list(promoted), "rejections": rejections, "variant_limit": limit}
