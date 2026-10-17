@@ -153,6 +153,7 @@ def native_contract(static, catalog):
     if catalog["engine"] == "sglang":
         if "speculative_algorithm" in requested:
             removed.update({"--speculative-algorithm": True, "--speculative-dspark-block-size": True})
+            drop.append("dspark")
         if "attn_dp_size" in parameters:
             removed["--enable-dp-attention"] = False
             append.extend((parameters["attn_dp_size"]["flags"][0], str(static.get("attn_dp_size", 1))))

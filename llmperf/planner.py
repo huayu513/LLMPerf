@@ -267,13 +267,18 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         static.update(attn_dp_size=actual_dp, dp=1)
                                         if '--enable-dp-lm-head' not in options:
                                             static['dp_lm_head'] = False
+                                    if engine == 'sglang' and caps.get('schema', {}).get('status') == 'discovered':
+                                        algorithm = catalog['parameters'].get('speculative_algorithm', {}).get('default')
+                                        if isinstance(algorithm, str) and algorithm:
+                                            static.update(speculative_algorithm=algorithm,
+                                                          dspark=algorithm.upper() == 'DSPARK')
                                     digest = fingerprint(static)
                                     ident = (
                                         f"{deployment['ascii_label']}-tp{tp}-dp{actual_dp}-pp{pp}-"
                                         f'a{int(dpa)}-{backend or "auto"}-ds{int(dspark)}-{digest[:8]}'
                                     )
                                     candidates.append(CandidateConfig(ident, tp, static['dp'], pp, dpa, backend,
-                                        dspark, tuple(deployment['gpu_indexes']), 'CANDIDATE', (), static, digest))
+                                        static.get('dspark', dspark), tuple(deployment['gpu_indexes']), 'CANDIDATE', (), static, digest))
     if not candidates:
         raise ConfigError('no candidate fits the selected GPUs and model metadata')
     candidates.sort(key=lambda c: (
