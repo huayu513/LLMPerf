@@ -369,6 +369,18 @@ function renderImageCapabilities(detail, metadata) {
   var analysis = detail.capability_analysis || metadata.capability_analysis;
   var preflight = detail.native_preflight || metadata.native_preflight || {};
   var results = preflight.results || [];
+  var passed = results.filter(function(row) { return row.status === "preflight_passed"; }).length;
+  var rejected = results.filter(function(row) { return row.status === "parser_rejected"; }).length;
+  var unknown = results.filter(function(row) { return row.status === "unknown"; });
+  var preflightStatus = preflight.status;
+  if (results.length && unknown.length === results.length) preflightStatus = "unknown";
+  else if (unknown.length && preflightStatus === "completed") preflightStatus = "partial";
+  else if (!results.length && preflightStatus === "completed") preflightStatus = "unknown";
+  var preflightLabel = { completed: "解析检查完成（不等于实测通过）", partial: "部分可验证，部分未知", unknown: "未完成验证（未知）" }[preflightStatus] || preflightStatus || "未记录";
+  var failureReason = preflight.reason || (unknown[0] && unknown[0].reason) || "";
+  var outcomes = metadata.capability_proposal_outcomes || [];
+  var matched = outcomes.filter(function(row) { return row.candidate_ids.length > 0; }).length;
+  var plannerCount = integrated.filter(function(item) { return item.integration === "existing_planner"; }).length;
   var rounds = (analysis && analysis.rounds) || [];
   var requests = rounds.reduce(function(total, round) {
     return total + ((round.request_attempts || {}).request_count || 0);
@@ -376,16 +388,35 @@ function renderImageCapabilities(detail, metadata) {
   var html = '<h3>镜像原生能力（' + escapeHtml(catalog.engine) + '）</h3>';
   html += renderKV([
     ["已发现 / 已接入参数", parameters.length + " / " + integrated.length],
+    ["接入分类", (integrated.length - plannerCount) + " 原生功能维度 + " + plannerCount + " 既有拓扑映射"],
     ["能力顾问", analysis ? analysis.status + "；逻辑轮次 " + rounds.length + "；实际 HTTP 请求 " + requests : "未调用（AUTO 或旧计划）"],
     ["独立分析预算", analysis ? (analysis.budget || {}).max_rounds + " 轮 / " + (analysis.budget || {}).timeout_seconds + " 秒；不占反馈配额" : "不适用"],
-    ["原生解析预检", preflight.status || "未记录"],
-    ["解析通过 / 拒绝 / 未知", results.filter(function(row) { return row.status === "preflight_passed"; }).length + " / " +
-      results.filter(function(row) { return row.status === "parser_rejected"; }).length + " / " +
-      results.filter(function(row) { return row.status === "unknown"; }).length],
-    ["最终参与候选的原生维度", metadata.feature_knobs || {}]
+    ["原生解析预检", preflightLabel],
+    ["解析通过 / 拒绝 / 未知", passed + " / " + rejected + " / " + unknown.length],
+    ["预检设备上下文", preflight.device_context === "selected_gpus" ? "按设备识别错误重试；仅暴露选定 GPU，不启动推理" : preflight.device_context === "no_gpu" ? "未暴露 GPU" : "旧报告未记录"],
+    ["顾问建议匹配最终候选", outcomes.length ? matched + " / " + outcomes.length + "；匹配不等于已经运行" : "未记录"],
+    ["纳入规划目录的建议维度", metadata.feature_knobs || {}]
   ]);
   html += '<p class="hint">已发现不代表已接入，未接入不代表引擎不支持；解析通过不代表模型/GPU 可用。这里显示规划证据，实际生效参数以 Trial 的 server.info.json 为准。</p>';
-  if (preflight.reason) html += '<p class="hint">预检说明：' + escapeHtml(preflight.reason) + '</p>';
+  if (failureReason) html += '<p class="hint">预检说明：' + escapeHtml(failureReason) + '</p>';
+  if (preflight.retry_unavailable) html += '<p class="hint">设备上下文重试不可用：' + escapeHtml(preflight.retry_unavailable) + '</p>';
+  if ((preflight.attempts || []).length || unknown.length) html += '<details><summary>原生解析预检诊断</summary><pre>' +
+    escapeHtml(JSON.stringify({ attempts: preflight.attempts || [], unknown_reasons: preflight.unknown_reasons ||
+      unknown.slice(0, 3).map(function(row) { return { reason: row.reason }; }) }, null, 2)) + '</pre></details>';
+  if (outcomes.length) {
+    html += '<details><summary>顾问建议落地（' + matched + ' / ' + outcomes.length + ' 匹配最终候选）</summary>' +
+      '<div class="table-wrap"><table><thead><tr><th>建议参数</th><th>规划结果</th><th>匹配候选</th></tr></thead><tbody>';
+    outcomes.forEach(function(row) {
+      var ids = row.candidate_ids;
+      html += '<tr><td><pre>' + escapeHtml(JSON.stringify(row.params, null, 2)) + '</pre></td><td>' +
+        (ids.length ? "已纳入候选池（未必已运行）" : "未进入最终候选池（非运行失败）") + '</td><td class="code">' +
+        escapeHtml(ids.slice(0, 8).join(", ") + (ids.length > 8 ? " …共 " + ids.length + " 个" : "")) + '</td></tr>';
+    });
+    html += '</tbody></table></div></details>';
+  }
+  var generation = metadata.native_generation || {};
+  if ((generation.rejections || []).length) html += '<details><summary>拓扑映射 / 组合约束拒绝</summary><pre>' +
+    escapeHtml(JSON.stringify(generation.rejections, null, 2)) + '</pre></details>';
   if (analysis) {
     var findings = [
       ["顾问功能建议（仍待实测）", analysis.features], ["顾问组合对照建议", analysis.experiments],
