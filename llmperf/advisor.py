@@ -60,6 +60,7 @@ class LocalAdvisor:
                 "You may request supplied evidence IDs for read-only supplemental inspection. "
                 "Do not invent supported methods, hardware restrictions or values absent from evidence. "
                 "Analyze native parallelism, expert/MoE communication and speculative decoding. "
+                "Parameters marked existing_planner select existing legal topologies; they never resize GPU allocations. "
                 "Propose baseline/control groups and useful values without a Cartesian explosion. "
                 "Not integrated does not mean unsupported. Parser accepted does not mean runtime verified. "
                 "Do not change workload, output/sampling semantics, model, image, GPU allocation or budgets. "
