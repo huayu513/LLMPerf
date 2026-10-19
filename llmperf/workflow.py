@@ -14,6 +14,7 @@ from .capabilities import probe_environment
 from .configuration import load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .errors import ConfigError
+from .model_weights import write_model_analysis
 from .planner import _jsonable, create_search_plan, fingerprint, load_plan, write_plan
 from .search import execute_search
 from .types import DockerConfig, PathConfig
@@ -68,6 +69,7 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     if stop_after == 'prepare':
         return {'command': stop_after, 'status': 'PASS', 'result_dir': str(root), 'requests': index['count']}
     plan = create_search_plan(config, model, workload, env, root)
+    write_model_analysis(plan, root)
     write_json_atomic(root / 'engine-capabilities.json', plan.metadata['engine_catalog'])
     knobs, restrictions = proposal_knobs({'features': [
         {'parameter': name, 'values': values} for name, values in observed_knobs(plan.metadata['engine_catalog']).items()]}, config)
@@ -109,7 +111,8 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     preflight = preflight_candidates(plan, config, root)
     plan.metadata['native_preflight'] = preflight
     plan.metadata['capability_artifacts'] = {name: sha256_file(root / name) for name in
-        ('engine-capabilities.json', 'native-preflight.json') if (root / name).is_file()}
+        ('engine-capabilities.json', 'native-preflight.json', 'model-weights.json', 'weight-capacity.json')
+        if (root / name).is_file()}
     rejected = {row['id'] for row in preflight['results'] if row.get('status') == 'parser_rejected'}
     plan = replace(plan, candidates=tuple(candidate for candidate in plan.candidates if candidate.id not in rejected))
     plan.metadata['candidates'] = {candidate.id: asdict(candidate) for candidate in plan.candidates}
@@ -157,7 +160,10 @@ def run_saved_plan(path, *, resume=False, executor=None, probe=probe_environment
         raise ConfigError('input source changed since planning; generate a new plan')
     options = metadata['configuration'].get('model_overrides', {})
     model = discover_model(Path(metadata['model_host']), options)
-    if fingerprint(asdict(model)) != metadata['model_fingerprint']:
+    model_identity = asdict(model)
+    if 'weights' not in metadata.get('model_snapshot', {}).get('raw', {}):
+        model_identity['raw'].pop('weights', None)
+    if fingerprint(model_identity) != metadata['model_fingerprint']:
         raise ConfigError('model metadata or weight inventory changed since planning; generate a new plan')
     if _bundle_fingerprint() != metadata['bundle_fingerprint']:
         raise ConfigError('benchmark runtime changed since planning; generate a new plan')

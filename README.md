@@ -15,6 +15,8 @@ Web 按入口选择模式，不需要业务人员配置 `strategy`：
 
 两个入口可以使用同一份配置；Web 智能调优明确选择 `adaptive`，AUTO 明确选择 `strict`。运行已保存计划时，以计划中的策略为准，不因当前页面或配置改变而切换。
 
+生成新计划时自动读取 `model_path` 下的配置、权重索引与 safetensors 张量头，识别存储规模、dtype 和量化证据，无需手填参数量，不加载模型或占用 GPU。按每个模型副本的容量淘汰已证明放不下的基础拓扑（8 卡 8 实例不会合并 8 张卡显存）；量化和加载证据不足时保持未知，不误杀。智能调优把摘要一并交给能力顾问分析，AUTO 只做规则筛选。前端“镜像原生能力 → 模型权重自动识别”和结果目录的 `model-weights.json`、`weight-capacity.json` 可查看依据；详见 `docs/image-native-tuning.md`。
+
 ```json
 "advisor": {
   "base_url": "http://10.64.39.63:54321/v1/chat/completions",
@@ -67,7 +69,7 @@ Web 页面在场景信息不足时保留前文，可直接输入补充信息继�
 python3 benchctl.py run --plan /path/to/result-dir/plan.json
 ```
 
-中断后点击“严格 Resume”，或执行 `python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume`。Strict 执行不调用顾问，也不依赖原配置文件；Adaptive 可调用顾问，但只使用计划冻结的搜索设置，原配置至多用于读取认证字段。两种模式都不在运行中新增候选。运行前核对模型、固定请求集、GPU、镜像和运行时代码。规划阶段保存 `plan.json`、`plan-lock.json`、`catalog.json` 和 `scenario.json`；开始搜索后才生成 `tune-state.json`、trial 与 `best.json`。运行现有吞吐 `auto` 时仍必须提供 `input_path`，其规划和评分逻辑没有变化。
+中断后点击“严格 Resume”，或执行 `python3 benchctl.py run --plan /path/to/result-dir/plan.json --resume`。Strict 执行不调用顾问，也不依赖原配置文件；Adaptive 可调用顾问，但只使用计划冻结的搜索设置，原配置至多用于读取认证字段。两种模式都不在运行中新增候选。运行前核对模型、固定请求集、GPU、镜像和运行时代码。规划阶段保存 `plan.json`、`plan-lock.json`、`catalog.json` 和 `scenario.json`；开始搜索后才生成 `tune-state.json`、trial 与 `best.json`。运行现有吞吐 `auto` 时仍必须提供 `input_path`；新计划增加通用权重容量筛选，吞吐评分沿用原有逻辑。
 
 ### Adaptive：实测反馈驱动选点
 

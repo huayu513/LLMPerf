@@ -27,6 +27,7 @@ from .configuration import ADVISOR_TIMEOUT_SECONDS, RunConfig, load_config, reso
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .errors import ConfigError
+from .model_weights import capacity_summary, weight_summary, write_model_analysis
 from .planner import _jsonable, create_search_plan, fingerprint, plan_to_dict, write_plan
 from .scene_workload import create_scene_workload
 from .search import collect_results
@@ -244,12 +245,15 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
     if index["jsonl_sha256"] != workload.sha256:
         raise ConfigError("workload changed during preparation")
     plan = create_search_plan(effective_config, model, workload, env, root)
+    write_model_analysis(plan, root)
     image_catalog = plan.metadata["engine_catalog"]
     write_json_atomic(root / "engine-capabilities.json", image_catalog)
     print(json.dumps({"event": "capability_analysis_start", "engine": config.engine,
                       "result_dir": str(root)}), flush=True)
     context = {"model": {key: value for key, value in model.raw.items()
-                         if key not in {"inventory", "provenance"}},
+                         if key not in {"inventory", "provenance", "weights"}},
+               "model_weights": weight_summary(model.raw.get("weights", {})),
+               "weight_capacity": capacity_summary(plan.metadata["weight_capacity"]),
                "gpus": [gpu.to_dict() for gpu in env.gpus], "scenario": scene,
                "versions": env.container.get("versions", {}),
                "image": config.image, "user_restrictions": config.engine_options,
@@ -435,7 +439,8 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
     template.metadata["capability_proposal_outcomes"] = proposal_outcomes(
         template.metadata.get("capability_analysis", {}), selected.values(), template.metadata["engine_catalog"])
     template.metadata["capability_artifacts"] = {name: sha256_file(root / name) for name in
-        ("engine-capabilities.json", "capability-analysis.json", "native-preflight.json") if (root / name).is_file()}
+        ("engine-capabilities.json", "capability-analysis.json", "native-preflight.json",
+         "model-weights.json", "weight-capacity.json") if (root / name).is_file()}
     effective_search = replace(config.search, concurrency_max=scene["target_concurrency"],
                                start_concurrency=scene["target_concurrency"])
     effective = replace(config, input_path=source, search=effective_search)
