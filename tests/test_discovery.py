@@ -3,6 +3,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import mock_open, patch
+
+from llmperf.model_weights import inspect_model_weights, screen_weight_capacity
+from llmperf.types import CandidateConfig, ModelManifest
 
 from llmperf.discovery import (
     discover_model,
@@ -10,6 +16,10 @@ from llmperf.discovery import (
     prepare_workload,
 )
 from llmperf.errors import ConfigError
+from llmperf.capabilities import EnvironmentSnapshot, GPUInfo
+from llmperf.tuning import plan_tuning
+from llmperf.workflow import run_saved_plan, run_workflow
+from llmperf.planner import fingerprint
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -261,6 +271,316 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIsNone(result["tokenizer_class"])
         self.assertIsNone(result["input_tokens"])
         self.assertEqual(json.loads(index_path.read_text()), result)
+
+
+def write_weights(path, tensors):
+    cursor = 0
+    header = {}
+    for name, dtype, shape, size in tensors:
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [cursor, cursor + size]}
+        cursor += size
+    raw = json.dumps(header).encode()
+    with path.open("wb") as output:
+        output.write(len(raw).to_bytes(8, "little"))
+        output.write(raw)
+        output.truncate(8 + len(raw) + cursor)
+    return raw
+
+
+class ModelWeightTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def test_auto_reads_shapes_dtype_and_payload_size_without_reading_tensor_data(self):
+        path = self.root / "model.safetensors"
+        header = write_weights(path, [
+            ("model.layers.0.weight", "BF16", [4, 5], 40),
+            ("lm_head.weight", "BF16", [2, 5], 20),
+            ("scalar", "F32", [], 4),
+        ])
+        opener = mock_open(read_data=len(header).to_bytes(8, "little") + header)
+        with patch("llmperf.model_weights.Path.open", opener):
+            report = inspect_model_weights(self.root, {"num_hidden_layers": 1})
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["parameter_count"], 31)
+        self.assertEqual(report["stored_weight_bytes"], 64)
+        self.assertEqual(report["minimum_resident_weight_bytes"], 40)
+        self.assertEqual(report["dtype_summary"]["BF16"]["elements"], 30)
+        self.assertIsNone(report["logical_parameter_count"])
+        self.assertEqual([call.args[0] for call in opener().read.call_args_list], [8, len(header)])
+
+    def test_index_selects_only_the_actual_checkpoint_and_ignores_extra_weights(self):
+        write_weights(self.root / "part-1.safetensors", [("model.a.weight", "F16", [4], 8)])
+        write_weights(self.root / "part-2.safetensors", [("model.b.weight", "F16", [6], 12)])
+        write_weights(self.root / "adapter_model.safetensors", [("adapter.weight", "F16", [99], 198)])
+        write_weights(self.root / "unrelated.safetensors", [("other.weight", "F16", [99], 198)])
+        (self.root / "model.safetensors.index.json").write_text(json.dumps({
+            "metadata": {"total_size": 20}, "weight_map": {
+                "model.a.weight": "part-1.safetensors", "model.b.weight": "part-2.safetensors"}}))
+        report = inspect_model_weights(self.root, {})
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["file_count"], 2)
+        self.assertEqual(report["parameter_count"], 10)
+        self.assertEqual(report["stored_weight_bytes"], 20)
+
+    def test_missing_indexed_shard_or_index_path_escape_never_proves_capacity(self):
+        for name in ("missing.safetensors", "../outside.safetensors", "/outside.safetensors"):
+            with self.subTest(name=name):
+                (self.root / "model.safetensors.index.json").write_text(json.dumps({
+                    "weight_map": {"model.weight": name}}))
+                report = inspect_model_weights(self.root, {})
+                self.assertNotEqual(report["status"], "complete")
+                self.assertIsNone(report["minimum_resident_weight_bytes"])
+                self.assertTrue(report["errors"])
+
+    def test_quantized_storage_is_not_claimed_to_be_logical_parameter_count(self):
+        write_weights(self.root / "model.safetensors", [("model.weight", "I32", [4], 16)])
+        report = inspect_model_weights(self.root, {"quantization_config": {"quant_method": "gptq", "bits": 4}}, "gptq")
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["stored_tensor_elements"], 4)
+        self.assertEqual(report["stored_weight_bytes"], 16)
+        self.assertIsNone(report["parameter_count"])
+        self.assertIsNone(report["minimum_resident_weight_bytes"])
+
+    def test_fp32_lower_bound_allows_loading_at_half_precision(self):
+        write_weights(self.root / "model.safetensors", [("model.weight", "F32", [10], 40)])
+        report = inspect_model_weights(self.root, {})
+        self.assertEqual(report["minimum_resident_weight_bytes"], 20)
+
+    def test_tied_output_heads_and_optional_draft_layers_are_excluded_from_lower_bound(self):
+        write_weights(self.root / "model.safetensors", [
+            ("model.layers.0.weight", "F16", [10], 20),
+            ("model.layers.1.weight", "F16", [20], 40),
+            ("model.mtp.weight", "F16", [10], 20),
+            ("lm_head.weight", "F16", [10], 20),
+        ])
+        report = inspect_model_weights(self.root, {"num_hidden_layers": 1})
+        self.assertEqual(report["minimum_resident_weight_bytes"], 20)
+
+    def test_binary_index_size_is_recorded_but_never_unpickled_or_used_as_GPU_bound(self):
+        (self.root / "pytorch_model.bin").write_bytes(b"not a pickle")
+        (self.root / "pytorch_model.bin.index.json").write_text(json.dumps({
+            "metadata": {"total_size": 300000000000},
+            "weight_map": {"model.weight": "pytorch_model.bin"}}))
+        report = inspect_model_weights(self.root, {})
+        self.assertEqual(report["index_declared_weight_bytes"], 300000000000)
+        self.assertIsNone(report["parameter_count"])
+        self.assertIsNone(report["minimum_resident_weight_bytes"])
+
+    def test_invalid_huge_header_and_truncated_payload_are_reported_not_loaded(self):
+        path = self.root / "model.safetensors"
+        path.write_bytes((2 ** 63).to_bytes(8, "little"))
+        report = inspect_model_weights(self.root, {})
+        self.assertTrue(report["errors"])
+        self.assertIsNone(report["minimum_resident_weight_bytes"])
+        write_weights(path, [("model.weight", "F16", [10], 20)])
+        with path.open("r+b") as output:
+            output.truncate(path.stat().st_size - 1)
+        report = inspect_model_weights(self.root, {})
+        self.assertTrue(report["errors"])
+        self.assertIsNone(report["minimum_resident_weight_bytes"])
+
+    def test_ambiguous_checkpoint_does_not_become_a_hard_bound(self):
+        write_weights(self.root / "weights.safetensors", [("model.weight", "F16", [10], 20)])
+        report = inspect_model_weights(self.root, {})
+        self.assertEqual(report["status"], "partial")
+        self.assertIsNone(report["minimum_resident_weight_bytes"])
+
+    def test_discovery_automatically_reads_model_path_without_manual_size_configuration(self):
+        (self.root / "config.json").write_text(json.dumps({"model_type": "qwen3",
+            "architectures": ["Qwen3ForCausalLM"], "num_hidden_layers": 2, "num_attention_heads": 2}))
+        (self.root / "tokenizer_config.json").write_text('{"chat_template":"<tool_call></tool_call>"}')
+        write_weights(self.root / "model.safetensors", [("model.layers.0.weight", "BF16", [10], 20)])
+        model = discover_model(self.root)
+        self.assertEqual(model.raw["weights"]["parameter_count"], 10)
+        self.assertEqual(model.raw["weights"]["minimum_resident_weight_bytes"], 20)
+
+    def test_nonstandard_runtime_dtype_cannot_prove_a_sixteen_bit_lower_bound(self):
+        write_weights(self.root / "model.safetensors", [("model.weight", "F32", [10], 40)])
+        report = inspect_model_weights(self.root, {"dtype": "float8_e4m3fn"})
+        self.assertEqual(report["parameter_count"], 10)
+        self.assertIsNone(report["minimum_resident_weight_bytes"])
+
+    def test_unspecified_quantization_or_compression_method_does_not_enable_hard_exclusion(self):
+        write_weights(self.root / "model.safetensors", [("model.weight", "F16", [10], 20)])
+        for metadata in ({"quantization_config": {}}, {"compression_config": {"format": "custom"}}):
+            report = inspect_model_weights(self.root, metadata)
+            self.assertTrue(report["quantization_declared"])
+            self.assertIsNone(report["minimum_resident_weight_bytes"])
+            self.assertIsNone(report["parameter_count"])
+
+
+class WeightCapacityTests(unittest.TestCase):
+    def model(self, **kwargs):
+        return ModelManifest("test", "/model", raw={"weights": {"minimum_resident_weight_bytes": 300 * 1024 ** 3},
+                                                    "is_moe": False}, **kwargs)
+
+    def environment(self):
+        return SimpleNamespace(gpus=[SimpleNamespace(index=index, memory_total_mb=80 * 1024) for index in range(8)])
+
+    def candidate(self, count, dp=1):
+        instances = [{"gpu_indexes": list(range(offset, offset + count))} for offset in range(0, 8, count)]
+        return CandidateConfig(str(count) + "-dp" + str(dp), tp=count // dp, dp=dp, gpu_indexes=tuple(range(8)),
+            static_config={"deployment": {"instance_count": len(instances), "gpus_per_instance": count,
+                "instances": instances, "label": "8 GPUs / " + str(len(instances)) + " instances"}})
+
+    def test_independent_instances_do_not_pool_all_eight_gpu_memories(self):
+        for engine in ("sglang", "vllm"):
+            with self.subTest(engine=engine):
+                candidates = [replace(self.candidate(count), static_config={**self.candidate(count).static_config,
+                              "engine": engine}) for count in (1, 2, 4, 8)]
+                kept, report = screen_weight_capacity(candidates, self.model(), self.environment())
+                self.assertEqual([candidate.tp for candidate in kept], [4, 8])
+                self.assertEqual(report["excluded_count"], 2)
+                self.assertEqual(report["candidates"][0]["optimistic_replica_capacity_bytes"], 80 * 1024 ** 3)
+                self.assertFalse(report["runtime_verified"])
+
+    def test_dense_data_parallelism_does_not_split_the_model_weights(self):
+        kept, report = screen_weight_capacity([self.candidate(8, dp=8)], self.model(), self.environment())
+        self.assertFalse(kept)
+        self.assertEqual(report["excluded_count"], 1)
+
+    def test_moe_uses_optimistic_instance_capacity_and_never_active_parameter_count(self):
+        model = replace(self.model(), raw={"is_moe": True, "active_parameters": 1,
+                                         "weights": {"minimum_resident_weight_bytes": 300 * 1024 ** 3}})
+        kept, report = screen_weight_capacity([self.candidate(1), self.candidate(8, dp=8)], model, self.environment())
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0].dp, 8)
+        self.assertEqual(report["excluded_count"], 1)
+
+    def test_unknown_quantization_custom_loading_or_missing_gpu_memory_does_not_hard_exclude(self):
+        for model in (self.model(quantization="fp8"), self.model(profile_env={"CUSTOM_LOADING": "1"}),
+                      replace(self.model(), raw={})):
+            kept, report = screen_weight_capacity([self.candidate(1)], model, self.environment())
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(report["excluded_count"], 0)
+        environment = self.environment()
+        environment.gpus[0].memory_total_mb = None
+        kept, report = screen_weight_capacity([self.candidate(8)], self.model(), environment)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(report["unknown_count"], 1)
+
+
+class WeightPlanningTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def configuration(self, engine="sglang", size_mb=300):
+        model = self.root / "model"
+        model.mkdir()
+        (model / "config.json").write_text(json.dumps({"model_type": "qwen3",
+            "architectures": ["Qwen3ForCausalLM"], "num_hidden_layers": 8, "num_attention_heads": 8}))
+        (model / "tokenizer_config.json").write_text('{"chat_template":"<tool_call></tool_call>"}')
+        write_weights(model / "model.safetensors", [
+            ("model.layers.0.weight", "BF16", [size_mb * 1024 ** 2 // 2], size_mb * 1024 ** 2)])
+        (self.root / "input.jsonl").write_text(json.dumps(DiscoveryTests.record(1)) + "\n")
+        config = self.root / "experiment.json"
+        config.write_text(json.dumps({"engine": engine, "model_path": "model",
+            "image": "repo/engine@sha256:" + "a" * 64, "output_dir": "results", "input_path": "input.jsonl",
+            "scenario": {"target_concurrency": 4, "priority": "latency", "max_input_tokens": 8192,
+                         "max_output_tokens": 2048},
+            "advisor": {"base_url": "http://127.0.0.1:9000/v1", "model": "local", "authorization": "Bearer test"},
+            "search": {"max_trials": 14, "repetitions": 1,
+                       "adaptive": {"candidate_pool_limit": 32, "max_advisor_calls": 3}}}))
+        return config
+
+    def environment(self, engine="sglang"):
+        options = ["--trust-remote-code", "--served-model-name", "--host", "--port", "--tool-call-parser",
+                   "--reasoning-parser", "--default-chat-template-kwargs"]
+        if engine == "sglang":
+            options += ["--tp-size", "--dp", "--pp-size", "--model-path", "--enable-metrics",
+                        "--enable-cache-report", "--mem-fraction-static", "--max-running-requests",
+                        "--chunked-prefill-size"]
+        else:
+            options += ["--tensor-parallel-size", "--data-parallel-size", "--pipeline-parallel-size",
+                        "--gpu-memory-utilization", "--max-num-seqs", "--max-num-batched-tokens",
+                        "--max-model-len", "--enforce-eager", "--enable-auto-tool-choice"]
+        return EnvironmentSnapshot("PASS", gpus=tuple(GPUInfo(index, "A800", 80, "8.0", f"GPU-{index}")
+            for index in range(8)), container={"capabilities": {"options": options,
+                "tool_parsers": ["qwen"], "reasoning_parsers": ["qwen3"]}})
+
+    def test_both_engines_send_automatic_weight_facts_to_advisor_and_freeze_reports(self):
+        class Advisor:
+            def __init__(self):
+                self.contexts = []
+
+            def ask(self, task, payload):
+                if task == "capabilities":
+                    self.contexts.append(payload["context"])
+                    return {"features": []}
+                return {"candidates": []}
+
+        for engine in ("sglang", "vllm"):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as directory:
+                self.root = Path(directory)
+                config = self.configuration(engine)
+                original = config.read_bytes(), (self.root / "input.jsonl").read_bytes()
+                advisor = Advisor()
+                with patch("llmperf.tuning.preflight_candidates", return_value={"status": "unknown", "results": []}):
+                    result = plan_tuning(config, probe=lambda _: self.environment(engine), advisor=advisor, calibrate=False)
+                plan = json.loads(Path(result["plan"]).read_text())
+                metadata = plan["metadata"]
+                context, = advisor.contexts
+                self.assertEqual(context["model_weights"]["parameter_count"], 300 * 1024 ** 2 // 2)
+                self.assertEqual(context["model_weights"]["stored_weight_bytes"], 300 * 1024 ** 2)
+                self.assertNotIn("files", context["model_weights"])
+                self.assertGreater(context["weight_capacity"]["excluded_count"], 0)
+                self.assertIn("deployment_summary", context["weight_capacity"])
+                self.assertTrue(all(candidate["tp"] * candidate["pp"] >= 4 for candidate in plan["candidates"]))
+                self.assertEqual(metadata["adaptive_policy"]["max_advisor_calls"], 3)
+                for name in ("model-weights.json", "weight-capacity.json"):
+                    report = Path(result["result_dir"]) / name
+                    self.assertEqual(hashlib.sha256(report.read_bytes()).hexdigest(), metadata["capability_artifacts"][name])
+                self.assertEqual(original, (config.read_bytes(), (self.root / "input.jsonl").read_bytes()))
+                report = Path(result["result_dir"]) / "model-weights.json"
+                report.write_text("{}")
+                with self.assertRaisesRegex(ConfigError, "capability evidence changed"):
+                    run_saved_plan(result["plan"], probe=lambda _: self.environment(engine))
+
+    def test_auto_screens_weights_without_calling_any_advisor(self):
+        config = self.configuration()
+        with patch("llmperf.advisor.LocalAdvisor.ask", side_effect=AssertionError("AUTO must not call LLM")), \
+                patch("llmperf.workflow.preflight_candidates", return_value={"status": "unknown", "results": []}):
+            result = run_workflow(config, stop_after="plan", probe=lambda _: self.environment())
+        plan = json.loads(Path(result["plan"]).read_text())
+        self.assertGreater(plan["metadata"]["weight_capacity"]["excluded_count"], 0)
+        self.assertTrue(all(candidate["tp"] * candidate["pp"] >= 4 for candidate in plan["candidates"]))
+        self.assertNotIn("capability_analysis", plan["metadata"])
+        self.assertTrue((Path(result["result_dir"]) / "model-weights.json").is_file())
+
+    def test_all_impossible_candidates_stop_before_llm_with_diagnostic_reports(self):
+        config = self.configuration(size_mb=1000)
+        with patch("llmperf.advisor.LocalAdvisor.ask", side_effect=AssertionError("LLM not needed for proven exclusions")):
+            with self.assertRaisesRegex(ConfigError, "all candidates exceed proven weight capacity"):
+                plan_tuning(config, probe=lambda _: self.environment(), calibrate=False)
+        report, = (self.root / "results").glob("*/weight-capacity.json")
+        weights = report.with_name("model-weights.json")
+        self.assertTrue(weights.is_file())
+        capacity = json.loads(report.read_text())
+        self.assertEqual(capacity["excluded_count"], capacity["input_candidates"])
+        self.assertEqual(capacity["retained_count"], 0)
+
+    def test_old_plan_without_weight_snapshot_preserves_original_model_identity(self):
+        config = self.configuration()
+        with patch("llmperf.workflow.preflight_candidates", return_value={"status": "unknown", "results": []}):
+            result = run_workflow(config, stop_after="plan", probe=lambda _: self.environment())
+        path = Path(result["plan"])
+        plan = json.loads(path.read_text())
+        metadata = plan["metadata"]
+        metadata["model_snapshot"]["raw"].pop("weights")
+        metadata["model_fingerprint"] = fingerprint(metadata["model_snapshot"])
+        metadata.pop("weight_capacity")
+        for name in ("model-weights.json", "weight-capacity.json"):
+            metadata["capability_artifacts"].pop(name)
+        path.write_text(json.dumps(plan))
+        with patch("llmperf.workflow.execute_search", return_value={"status": "PASS"}) as executor:
+            report = run_saved_plan(path, probe=lambda _: self.environment())
+        self.assertEqual(report["status"], "PASS")
+        executor.assert_called_once()
 
 
 if __name__ == "__main__":

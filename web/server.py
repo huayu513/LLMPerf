@@ -1803,6 +1803,8 @@ def run_detail(run_dir: Path) -> dict[str, Any]:
         "catalog": json_load(run_dir / "catalog.json", None),
         "capability_analysis": json_load(run_dir / "capability-analysis.json", None),
         "native_preflight": json_load(run_dir / "native-preflight.json", None),
+        "model_weights": json_load(run_dir / "model-weights.json", None),
+        "weight_capacity": json_load(run_dir / "weight-capacity.json", None),
         "results_index": json_load(run_dir / "results-index.json", None),
         "leaderboard": json_load(run_dir / "leaderboard.json", None),
         "best_so_far": json_load(run_dir / "best-so-far.json", None),

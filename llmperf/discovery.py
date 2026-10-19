@@ -14,6 +14,7 @@ from types import ModuleType
 from typing import Any
 
 from .errors import ConfigError
+from .model_weights import inspect_model_weights
 from .types import ModelManifest, WorkloadManifest
 
 
@@ -428,6 +429,7 @@ def discover_model(
         "num_attention_heads": heads,
         "num_hidden_layers": layers,
         "is_moe": is_moe,
+        "weights": inspect_model_weights(path, metadata, quantization),
         "provenance": provenance,
     }
     return ModelManifest(

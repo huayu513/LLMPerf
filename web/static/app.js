@@ -386,6 +386,34 @@ function renderImageCapabilities(detail, metadata) {
     return total + ((round.request_attempts || {}).request_count || 0);
   }, 0);
   var html = '<h3>镜像原生能力（' + escapeHtml(catalog.engine) + '）</h3>';
+  var weights = detail.model_weights || ((metadata.model_snapshot || {}).raw || {}).weights;
+  var capacity = detail.weight_capacity || metadata.weight_capacity;
+  function weightBytes(value) {
+    return typeof value === "number" ? (value / Math.pow(1024, 3)).toFixed(2) + " GiB" : "未知";
+  }
+  if (weights) {
+    html += '<h4>模型权重自动识别</h4>' + renderKV([
+      ["权重扫描", weights.status + " / " + weights.format + "；" + weights.file_count + " 个权重文件"],
+      ["未量化检查点元素数（非去重参数量）", weights.parameter_count == null ? "未知（不猜测量化模型参数量）" :
+        weights.parameter_count.toLocaleString() + "（" + (weights.parameter_count / 1e9).toFixed(3) + "B）"],
+      ["权重数据大小 / 文件大小", weightBytes(weights.stored_weight_bytes) + " / " + weightBytes(weights.weight_file_bytes)],
+      ["存储 dtype / 量化", Object.keys(weights.dtype_summary || {}).join(", ") + " / " +
+        (weights.quantization || (weights.quantization_declared ? "存在声明，方法未知" : "未识别到量化声明"))],
+      ["保守常驻权重下界", weightBytes(weights.minimum_resident_weight_bytes)]
+    ]);
+    html += '<p class="hint">只读取索引和张量头，不加载模型。存储元素数不等于去重参数量或 MoE 激活参数量，磁盘大小不等于运行显存。</p>';
+    if ((weights.unknowns || []).length || (weights.errors || []).length) html +=
+      '<details><summary>权重识别未知项 / 错误</summary><pre>' + escapeHtml(JSON.stringify({
+        unknowns: weights.unknowns || [], errors: weights.errors || [] }, null, 2)) + '</pre></details>';
+  }
+  if (capacity) {
+    html += renderKV([["基础拓扑容量筛选", "淘汰 " + capacity.excluded_count + " / " + capacity.input_candidates +
+      "；保留 " + capacity.retained_count + "（其中未知 " + capacity.unknown_count + "）"]]);
+    html += '<p class="hint">按每个模型副本可分片的显存筛选，独立实例不合并显存；保留不代表能启动，尚未计入 KV cache、工作区等开销。计数为原生参数变体生成前的基础候选。</p>';
+    html += '<details><summary>权重容量筛选依据</summary><pre>' +
+      escapeHtml(JSON.stringify({ assumptions: capacity.assumptions || [], excluded: (capacity.candidates || []).filter(function(row) {
+        return row.status === "excluded"; }).slice(0, 16) }, null, 2)) + '</pre></details>';
+  }
   html += renderKV([
     ["已发现 / 已接入参数", parameters.length + " / " + integrated.length],
     ["接入分类", (integrated.length - plannerCount) + " 原生功能维度 + " + plannerCount + " 既有拓扑映射"],
@@ -434,7 +462,10 @@ function renderImageCapabilities(detail, metadata) {
     })) + '</details>';
   }
   html += '<div class="button-row compact">';
-  ["engine-capabilities.json", "capability-analysis.json", "native-preflight.json"].forEach(function(path) {
+  var capabilityArtifacts = ["engine-capabilities.json", "capability-analysis.json", "native-preflight.json"];
+  if (weights) capabilityArtifacts.push("model-weights.json");
+  if (capacity) capabilityArtifacts.push("weight-capacity.json");
+  capabilityArtifacts.forEach(function(path) {
     if (path !== "capability-analysis.json" || analysis) html += '<button data-capability-artifact="' + path + '">' + path + '</button>';
   });
   box.innerHTML = html + '</div>';

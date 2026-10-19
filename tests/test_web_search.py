@@ -1,5 +1,8 @@
 import tempfile
 import unittest
+import json
+import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,6 +10,65 @@ from web import server
 
 
 class WebSearchTests(unittest.TestCase):
+    def test_run_detail_exposes_weight_reports_without_requiring_them_for_old_runs(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(server, "summarize_run", return_value={}), \
+                patch.object(server, "code_state", return_value={}):
+            root = Path(directory)
+            self.assertIsNone(server.run_detail(root)["model_weights"])
+            self.assertIsNone(server.run_detail(root)["weight_capacity"])
+            for filename, key in (("model-weights.json", "model_weights"), ("weight-capacity.json", "weight_capacity")):
+                report = {"version": 1, "status": "unknown", "reason": "fixture"}
+                (root / filename).write_text(json.dumps(report))
+                self.assertEqual(server.run_detail(root)[key], report)
+
+    @unittest.skipUnless(shutil.which("node"), "frontend verification needs Node.js")
+    def test_weight_panel_labels_uncertainty_escapes_errors_and_opens_reports(self):
+        script = r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const elements = new Map();
+let click;
+const button = { dataset: { capabilityArtifact: "model-weights.json" }, addEventListener: (_, handler) => { click = handler; } };
+const context = { console, document: { getElementById: id => {
+  if (!elements.has(id)) elements.set(id, { innerHTML: "", textContent: "", querySelectorAll: () => [button] });
+  return elements.get(id);
+}}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync("web/static/app.js", "utf8").replace("init().catch(showError);", ""), context);
+const weights = { status: "complete", format: "safetensors", file_count: 16,
+  parameter_count: 300e9, stored_weight_bytes: 600 * 1024 ** 3, weight_file_bytes: 600 * 1024 ** 3,
+  minimum_resident_weight_bytes: 599 * 1024 ** 3, dtype_summary: { BF16: {} }, errors: ["<unsafe>"], unknowns: [] };
+const capacity = { excluded_count: 2, input_candidates: 4, retained_count: 2, unknown_count: 1, candidates: [] };
+context.renderImageCapabilities({ model_weights: weights, weight_capacity: capacity }, {
+  engine_catalog: { engine: "vllm", parameters: {} } });
+let html = context.document.getElementById("image-capabilities").innerHTML;
+for (const expected of ["模型权重自动识别", "非去重参数量", "300.000B", "600.00 GiB", "BF16",
+  "淘汰 2 / 4", "其中未知 1", "独立实例不合并显存", "保留不代表能启动", "&lt;unsafe&gt;",
+  'data-capability-artifact="model-weights.json"', 'data-capability-artifact="weight-capacity.json"'])
+  assert.ok(html.includes(expected), expected);
+assert.ok(!html.includes("<unsafe>"));
+let opened;
+context.loadArtifact = path => { opened = path; return Promise.resolve(); };
+context.setActiveTab = () => {};
+context.state.selectedTrial = "trial";
+click();
+assert.equal(opened, "model-weights.json");
+assert.equal(context.state.selectedTrial, null);
+context.renderImageCapabilities({}, { engine_catalog: { engine: "sglang", parameters: {} },
+  model_snapshot: { raw: { weights: { ...weights, parameter_count: null, minimum_resident_weight_bytes: null,
+    quantization: "gptq", dtype_summary: { I32: {} } } } } });
+html = context.document.getElementById("image-capabilities").innerHTML;
+assert.ok(html.includes("未知（不猜测量化模型参数量）"));
+assert.ok(html.includes("I32 / gptq"));
+context.renderImageCapabilities({}, {});
+assert.equal(context.document.getElementById("image-capabilities").hidden, true);
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True,
+                                text=True, cwd=Path(__file__).resolve().parents[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_plan_candidates_exposes_failed_and_skipped_state(self):
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory)

@@ -10,6 +10,7 @@ from pathlib import Path
 from .artifacts import write_json_atomic
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE
 from .errors import ConfigError
+from .model_weights import screen_weight_capacity
 from .engines import vllm_plan_settings
 from .feature_catalog import engine_catalog
 from .types import CandidateConfig, Plan, PlanTask
@@ -281,6 +282,8 @@ def create_search_plan(config, model, workload, env, result_dir):
                                         static.get('dspark', dspark), tuple(deployment['gpu_indexes']), 'CANDIDATE', (), static, digest))
     if not candidates:
         raise ConfigError('no candidate fits the selected GPUs and model metadata')
+    candidates, weight_capacity = screen_weight_capacity(candidates, model, env)
+    candidates = list(candidates)
     candidates.sort(key=lambda c: (
         c.static_config.get('deployment', {}).get('gpus_per_instance', len(c.gpu_indexes) or 1),
         c.tp, c.dp, c.dspark, c.pp > 1, c.dp_attention,
@@ -326,6 +329,7 @@ def create_search_plan(config, model, workload, env, result_dir):
         shm_size=config.docker.shm_size, ipc=config.docker.ipc,
         candidates={c.id: asdict(c) for c in candidates},
         engine_catalog=catalog,
+        weight_capacity=weight_capacity,
         comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',
         search_scope=('homogeneous GPU groups, deployment topology, compatible per-instance TP/DP/PP; '
