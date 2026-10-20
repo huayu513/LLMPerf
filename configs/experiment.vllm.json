@@ -3,6 +3,13 @@
   "model_path": "/data_sdb/model/DeepSeek-V4-Flash-0731",
   "input_path": "/data_sdc/hjh19509/s1slow/input_data_0831.jsonl",
   "image": "registry-1.docker.io/lazymio/vllm-backport@sha256:2627d2a97e7f539b99ac98f511c589f5f520d3fc5630b195aca7f6ef865ead4e",
+  "model_overrides": {
+    "chat_template_kwargs": {
+      "thinking": true,
+      "enable_thinking": true,
+      "reasoning_effort": "high"
+    }
+  },
   "output_dir": "/data_sdc/hjh19509/s1slow/LLMPerf/results",
   "gpu_indexes": [0, 1, 2, 3, 4, 5, 6, 7],
   "smoke": false,
