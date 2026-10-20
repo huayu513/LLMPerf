@@ -68,7 +68,8 @@ def summarize_trial(result: dict, candidate: dict, root: Path) -> dict:
                ("task_id", "candidate_id", "status", "score", "output_tokens_per_second",
                 "latency_seconds", "ttft_seconds", "tpot_seconds", "error_rate",
                 "scene_lengths", "failure_kind", "failure_phase", "container_oom_killed",
-                "backend_unsupported", "reasons", "measured_seconds", "trial_seconds")
+                "backend_unsupported", "reasons", "warnings", "memory_diagnostics", "oom_log_paths",
+                "measured_seconds", "trial_seconds")
                if key in result}
     summary["planned_configuration"] = candidate_summary(candidate)
     effective = result.get("effective_static_config")
@@ -81,7 +82,7 @@ def summarize_trial(result: dict, candidate: dict, root: Path) -> dict:
             and candidate["static_config"].get(key) != value}
     excerpts = []
     attempt = Path(result.get("result_path", root / "absent")).resolve()
-    if result.get("status") != "VALID" and attempt.is_relative_to((root / "trials").resolve()):
+    if (result.get("status") != "VALID" or result.get("warnings")) and attempt.is_relative_to((root / "trials").resolve()):
         for path in sorted(attempt.rglob("*.log")):
             if len(excerpts) >= 2:
                 break

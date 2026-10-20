@@ -8,6 +8,9 @@ from llmperf.adapters import ReplayAdapter, read_attempt
 from llmperf.deployment_ports import deployment_service_ports
 from llmperf.types import PlanTask
 from llmperf.docker_runtime import DockerRunResult
+from llmperf.evidence import summarize_trial
+from llmperf.search import _is_oom_failure, _score, execute_search
+from llmperf.types import CandidateConfig, Plan
 
 class FakeRuntime:
     def __init__(self, server_command=False, server_command_subdir="", server_command_text="echo server\n"):
@@ -620,5 +623,175 @@ class AdapterTests(unittest.TestCase):
                 "expected_source_sha256": "e" * 64, "expected_request_count": 1,
             })
             self.assertIn("controller_completion_missing", result["reasons"])
+
+class MemoryOutcomeTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.attempt = self.root / "trials" / "task" / "attempt-1"
+        self.attempt.mkdir(parents=True)
+        self.task = PlanTask("task", 1, "candidate", run_class="formal", concurrency=8)
+        self.metadata = {"expected_source_sha256": "a" * 64, "expected_request_count": 256}
+        self.summary = {
+            "jsonl_sha256": "a" * 64, "request_count": 256, "successes": 256,
+            "failures": 0, "server_usage_available": 256, "server_usage_missing": 0,
+            "completion_tokens": 2560, "measured_seconds": 128.0,
+            "output_tokens_per_second": 20.0, "base_url": "http://127.0.0.1:25080",
+        }
+        self.write_json("formal.summary.json", self.summary)
+        self.write_json("server.requested.json", {"model_path": "/model", "max_running_requests": 8})
+        self.write_json("server.info.json", {"server_args": {"model_path": "/model", "max_running_requests": 8}})
+        self.write_json("server.evidence.json", {
+            "readiness": True, "server_info_captured": True, "resolved": True,
+            "requested_server_parameters": {"model_path": "/model", "max_running_requests": 8},
+            "unsupported_parameters": [], "mismatched_parameters": [],
+        })
+        self.write_json("run_manifest.json", {"state": "complete", "exit_code": 0})
+        (self.attempt / "server.log").write_text("CUDA out of memory. Tried to allocate 512 MiB\n")
+
+    def write_json(self, name, value):
+        (self.attempt / name).write_text(json.dumps(value), encoding="utf-8")
+
+    def read(self, **kwargs):
+        return read_attempt(self.attempt, self.task, self.metadata, **kwargs)
+
+    def test_log_only_oom_preserves_complete_measurement_with_warning(self):
+        result = self.read()
+        self.assertEqual(result["status"], "VALID", result["reasons"])
+        self.assertEqual(result["reasons"], [])
+        self.assertEqual(result["warnings"], ["memory_allocation_oom_observed"])
+        self.assertNotIn("failure_kind", result)
+        self.assertFalse(result["container_oom_killed"])
+        self.assertEqual(result["successes"], 256)
+        self.assertEqual(result["measured_seconds"], 128.0)
+        self.assertEqual(result["output_tokens_per_second"], 20.0)
+        self.assertTrue(result["memory_diagnostics"]["trial_completed"])
+        self.assertEqual(result["memory_diagnostics"]["phase"], "unknown")
+        self.assertEqual(result["memory_diagnostics"]["log_excerpts"][0]["line"], 1)
+        self.assertFalse(_is_oom_failure(result))
+        self.assertEqual(_score(result), 20.0)
+
+    def test_container_oom_kill_rejects_even_complete_requests(self):
+        (self.attempt / "container-oom-killed").write_text("1\n")
+        result = self.read()
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertEqual(result["failure_kind"], "oom")
+        self.assertIn("out_of_memory", result["reasons"])
+        self.assertTrue(_is_oom_failure(result))
+
+    def test_logged_oom_kill_rejects_even_complete_requests(self):
+        (self.attempt / "server.log").write_text("container terminated: OOMKilled\n")
+        result = self.read()
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertEqual(result["failure_kind"], "oom")
+
+    def test_explicit_false_oom_kill_is_not_hard_failure(self):
+        for message in ("OOMKilled=false", '"OOMKilled": false', "oom_killed=0"):
+            with self.subTest(message=message):
+                (self.attempt / "server.log").write_text("CUDA out of memory\n" + message + "\n")
+                self.assertEqual(self.read()["status"], "VALID")
+
+    def test_worker_death_is_not_ignored_when_requests_completed(self):
+        with (self.attempt / "server.log").open("a") as log:
+            log.write("EngineCore_DP0 process died unexpectedly\n")
+        result = self.read()
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertIn("server_process_failure", result["reasons"])
+        self.assertEqual(result["failure_kind"], "oom")
+
+    def test_failed_requests_with_oom_remain_failure(self):
+        self.write_json("formal.summary.json", {**self.summary, "successes": 255, "failures": 1})
+        result = self.read()
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertEqual(result["failure_kind"], "oom")
+
+    def test_nonzero_exit_with_oom_remains_failure(self):
+        result = self.read(exit_code=1)
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["failure_kind"], "oom")
+
+    def test_timeout_is_not_overwritten_by_allocation_log(self):
+        (self.attempt / "container-timeout").write_text("1\n")
+        result = self.read(exit_code=124)
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertEqual(result["failure_kind"], "timeout")
+
+    def test_warning_does_not_bypass_usage_source_or_score_validation(self):
+        for changes in (
+            {"server_usage_missing": 1, "server_usage_available": 255},
+            {"jsonl_sha256": "b" * 64}, {"output_tokens_per_second": 99.0},
+            {"request_count": 255},
+        ):
+            with self.subTest(changes=changes):
+                self.write_json("formal.summary.json", {**self.summary, **changes})
+                result = self.read()
+                self.assertNotEqual(result["status"], "VALID")
+                self.assertNotIn("failure_kind", result)
+
+    def test_warning_does_not_bypass_parameter_validation(self):
+        self.write_json("server.info.json", {"server_args": {"max_running_requests": 9}})
+        result = self.read()
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertIn("server_parameter_mismatch", result["reasons"])
+
+    def test_completion_evidence_and_fingerprint_include_all_instances(self):
+        original = self.read()
+        self.write_json("server.completion.json", {
+            "instances": [{"id": "i0", "process_alive": True, "healthy": True}],
+        })
+        complete = self.read()
+        self.assertEqual(complete["status"], "VALID", complete["reasons"])
+        self.assertNotEqual(complete["evidence_fingerprint"], original["evidence_fingerprint"])
+        self.write_json("server.completion.json", {
+            "instances": [{"id": "i0", "process_alive": True, "healthy": False}],
+        })
+        result = self.read()
+        self.assertNotEqual(result["status"], "VALID")
+        self.assertIn("server_completion_invalid", result["reasons"])
+        self.assertEqual(result["failure_kind"], "oom")
+
+    def test_invalid_completion_evidence_fails_closed(self):
+        for payload in ("invalid", "null", "{}", '{"instances":[]}',
+                        '{"instances":[{"id":{},"process_alive":true,"healthy":true}]}'):
+            with self.subTest(payload=payload):
+                (self.attempt / "server.completion.json").write_text(payload)
+                self.assertIn("server_completion_invalid", self.read()["reasons"])
+
+    def test_advisor_receives_bounded_redacted_warning_evidence(self):
+        (self.attempt / "server.log").write_text(
+            ("CUDA out of memory. Authorization: Bearer private-token " + "x" * 2000 + "\n") * 10)
+        result = self.read()
+        result["result_path"] = str(self.attempt)
+        candidate = {"id": "candidate", "config_hash": "hash", "static_config": {}}
+        summary = summarize_trial(result, candidate, self.root)
+        self.assertEqual(summary["status"], "VALID")
+        self.assertEqual(summary["warnings"], ["memory_allocation_oom_observed"])
+        self.assertEqual(len(summary["memory_diagnostics"]["log_excerpts"]), 6)
+        self.assertLessEqual(len(summary["memory_diagnostics"]["log_excerpts"][0]["text"]), 1200)
+        self.assertTrue(summary["log_excerpts"])
+        self.assertLessEqual(len(summary["log_excerpts"][0]["tail"]), 2048)
+        self.assertNotIn("private-token", json.dumps(summary))
+
+    def test_warning_result_continues_search_and_final_repetitions(self):
+        candidate = CandidateConfig("candidate", static_config={"tp": 1, "dp": 1, "pp": 1}, config_hash="hash")
+        search_plan = Plan("test", candidates=(candidate,), metadata={
+            "expected_source_sha256": "a" * 64, "expected_request_count": 256,
+            "search": {"concurrency_max": 32, "start_concurrency": 16, "max_trials": 20,
+                       "max_seconds": 10000, "repetitions": 3, "explore_request_limit": 256,
+                       "promotion_tolerance": 0.05, "open_loop_scales": []},
+            "candidates": {"candidate": {"id": "candidate", "static_config": candidate.static_config}},
+        })
+        calls = []
+        def execute(task, attempt):
+            calls.append(task)
+            return {"status": "VALID", "output_tokens_per_second": task.concurrency,
+                    "warnings": ["memory_allocation_oom_observed"], "reasons": []}
+        result = execute_search(search_plan, self.root / "search", executor=execute)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["best"]["concurrency"], 32)
+        self.assertEqual([task.concurrency for task in calls if task.run_class == "concurrency"], [16, 32])
+        self.assertEqual(len([task for task in calls if task.run_class == "final_repeat"]), 3)
+
 
 if __name__ == "__main__": unittest.main()

@@ -31,7 +31,7 @@ def _is_oom_failure(result):
     other deployment topology.
     """
 
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or result.get("status") == "VALID":
         return False
     if result.get("failure_kind") == "oom" or result.get("out_of_memory") is True:
         return True

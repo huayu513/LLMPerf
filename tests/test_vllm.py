@@ -291,6 +291,14 @@ class VLLMTests(unittest.TestCase):
         self.assertTrue(evidence["resolved"])
         self.assertEqual(len(evidence["instances"]), 2)
         self.assertEqual(sum(command[1] == str(controller.REPLAY) for command in calls), 1)
+        completion = json.loads((output / "server.completion.json").read_text())
+        self.assertEqual(completion["scope"], "after_replay_before_stop")
+        self.assertEqual([item["id"] for item in completion["instances"]], ["i0", "i1"])
+        self.assertTrue(all(item["process_alive"] and item["healthy"] for item in completion["instances"]))
+        replay_index = next(offset for offset, command in enumerate(calls) if command[1] == str(controller.REPLAY))
+        status_indexes = [offset for offset, command in enumerate(calls) if command[0] == "bash" and command[2] == "status"]
+        stop_index = next(offset for offset, command in enumerate(calls) if command[0] == "bash" and command[2] == "stop")
+        self.assertTrue(all(replay_index < offset < stop_index for offset in status_indexes))
         for instance in candidate.static_config["deployment"]["instances"]:
             self.assertTrue((output / "instances" / instance["id"] / "server.info.json").is_file())
         (output / "formal.summary.json").write_text(json.dumps({"jsonl_sha256": "a" * 64,
@@ -301,6 +309,10 @@ class VLLMTests(unittest.TestCase):
         (output / "container-exit-code").write_text("0\n")
         result = read_attempt(output, task, metadata)
         self.assertEqual(result["status"], "VALID", result["reasons"])
+        for instances in (completion["instances"][:1], [completion["instances"][0]] * 2):
+            (output / "server.completion.json").write_text(json.dumps({**completion, "instances": instances}))
+            self.assertIn("server_completion_invalid", read_attempt(output, task, metadata)["reasons"])
+        (output / "server.completion.json").write_text(json.dumps(completion))
         damaged = output / "instances" / "i1" / "server.info.json"
         payload = json.loads(damaged.read_text())
         payload["vllm_config"]["parallel_config"]["tensor_parallel_size"] = 99
@@ -427,6 +439,32 @@ class VLLMTests(unittest.TestCase):
         self.assertEqual(probe.call_args.args[0].engine, "vllm")
         saved = json.loads((Path(report["result_dir"]) / "plan.json").read_text())
         self.assertEqual(saved["metadata"]["configuration"]["engine"], "vllm")
+
+
+class ServerCompletionTests(unittest.TestCase):
+    def test_completion_checks_every_instance_without_restarting(self):
+        started = [({"id": "i0"}, {"SERVER_PORT": "25080"}), ({"id": "i1"}, {"SERVER_PORT": "25336"})]
+        with patch.object(controller.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as execute, \
+                patch.object(controller, "http_ok", side_effect=[True, False]) as health:
+            completion = controller.capture_server_completion(started, ["http://127.0.0.1:25080", "http://127.0.0.1:25336"])
+        self.assertEqual([item["healthy"] for item in completion["instances"]], [True, False])
+        self.assertTrue(all(item["process_alive"] for item in completion["instances"]))
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(health.call_count, 2)
+        for call in execute.call_args_list:
+            self.assertEqual(call.args[0], ["bash", str(controller.LAUNCHER), "status"])
+            self.assertEqual(call.kwargs["timeout"], 10)
+        self.assertEqual(health.call_args.kwargs["timeout"], 5.0)
+
+    def test_dead_or_unverifiable_process_is_not_healthy(self):
+        for outcome in (SimpleNamespace(returncode=1), subprocess.TimeoutExpired("status", 10), OSError("missing")):
+            with self.subTest(outcome=outcome):
+                options = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+                with patch.object(controller.subprocess, "run", **options), patch.object(controller, "http_ok") as health:
+                    completion = controller.capture_server_completion([({"id": "i0"}, {})], ["http://localhost:25080"])
+                self.assertFalse(completion["instances"][0]["process_alive"])
+                self.assertFalse(completion["instances"][0]["healthy"])
+                health.assert_not_called()
 
 
 if __name__ == "__main__":

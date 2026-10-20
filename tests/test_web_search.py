@@ -10,6 +10,39 @@ from web import server
 
 
 class WebSearchTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "frontend verification needs Node.js")
+    def test_trial_keeps_valid_badge_and_renders_escaped_warnings(self):
+        script = r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const elements = new Map();
+const context = { console, document: { getElementById: id => {
+  if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", querySelectorAll: () => [] });
+  return elements.get(id);
+}}};
+vm.createContext(context);
+vm.runInContext(fs.readFileSync("web/static/app.js", "utf8").replace("init().catch(showError);", ""), context);
+context.state.trials = [{ task_id: "task", status: "VALID", reasons: [],
+  warnings: ["memory_allocation_oom_observed", "<unsafe>"], output_tokens_per_second: 20,
+  successes: 256, request_count: 256 }];
+context.renderTrials();
+let html = context.document.getElementById("trials").innerHTML;
+for (const expected of ["VALID", "失败原因 / 告警", "告警：", "不单独代表本轮失败", "&lt;unsafe&gt;", "256 / 256"])
+  assert.ok(html.includes(expected), expected);
+assert.ok(!html.includes("<unsafe>"));
+context.document.getElementById("trial-filter").value = "memory_allocation_oom_observed";
+context.renderTrials();
+assert.ok(context.document.getElementById("trials").innerHTML.includes("VALID"));
+context.state.trials = [{ task_id: "old-trial", status: "VALID", reasons: [] }];
+context.document.getElementById("trial-filter").value = "";
+context.renderTrials();
+assert.ok(!context.document.getElementById("trials").innerHTML.includes("告警："));
+'''
+        result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True,
+                                text=True, cwd=Path(__file__).resolve().parents[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_run_detail_exposes_weight_reports_without_requiring_them_for_old_runs(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(server, "summarize_run", return_value={}), \

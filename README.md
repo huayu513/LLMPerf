@@ -188,6 +188,8 @@ python3 benchctl.py auto --config configs/experiment.json
 
 如果候选服务在启动阶段因为参数不支持、参数不匹配或其他配置错误而失败，当前 candidate 会记录为 `FAILED`；只有服务已经就绪、原生参数证据明确指出所请求的显式 MoE runner backend 不受支持时，后续使用同一 backend 的候选才会记录为 `SKIPPED`。未就绪、缺少证据、OOM、模型加载失败和拓扑相关参数不匹配只影响当前 candidate。引擎自动选择的 `auto` 没有可确认的 backend，不会据此误跳过其他候选。回放阶段的请求失败或 OOM 只停止当前 candidate 的并发分支。失败候选和 backend 跳过原因会写入 `search-state.json`、`results-index.json` 和 `best.json`。需要复查时可在前端对单个 candidate 使用“单独重跑这个参数”，该入口不受自动搜索的 backend 跳过状态影响。
 
+日志中的显存/内存分配 OOM 不再单独否决 trial：请求全部成功、usage 完整、输入和实际服务参数可核验、控制器正常结束时，结果可保持 `VALID`，并单独记录 `warnings: ["memory_allocation_oom_observed"]`。实际 `OOMKilled`、进程异常退出、回放请求失败和服务异常仍会拦截有效结果；SGLang 单实例及多实例/vLLM 控制器会在回放结束、主动停服前检查每个实例的进程与 `/health`，保存 `server.completion.json`，检查失败或报告无效不能通过。检查在计量结束后执行，不剔除回放期间的实际耗时，也不把日志告警解释为已确认恢复或稳定可用。前端 trial 表的“失败原因 / 告警”、`trial.json` 和提供给反馈顾问的证据会保留告警及有界日志摘录。带告警的有效结果仍按现有规则参与搜索和最终独立重复验证，不会仅因日志命中而提前停止并发分支。旧结果允许没有健康检查报告，但升级不会自动改写已落盘的判定，需要单独重跑候选验证。
+
 输入沿用现有捕获格式，每行是一条请求，例如：
 
 ```json

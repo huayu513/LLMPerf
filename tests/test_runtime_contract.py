@@ -3,7 +3,11 @@ import json
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
+from unittest.mock import patch
+
+from benchmarks import run_deployment_point as controller
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +87,25 @@ class RuntimeShellContractTests(unittest.TestCase):
                         actual = json.loads(command[command.index("--default-chat-template-kwargs") + 1])
                         self.assertEqual(actual, override if override is not None else {
                             "enable_thinking": True, "reasoning_effort": "max", "thinking": True})
+
+
+    def test_single_instance_completion_runs_after_replay_before_cleanup(self):
+        source = RUN_POINT.read_text()
+        replay_end = source.index('"$REPLAY" "${replay_args[@]}" --output-dir "$output_dir"')
+        completion_source = source[replay_end:].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        for healthy in (True, False):
+            with self.subTest(healthy=healthy), tempfile.TemporaryDirectory() as directory:
+                report = {"instances": [{"id": "i0", "process_alive": True, "healthy": healthy}]}
+                with patch.dict(sys.modules, {"run_deployment_point": controller}), \
+                        patch.object(controller, "capture_server_completion", return_value=report) as capture, \
+                        patch.object(sys, "path", list(sys.path)), \
+                        patch.object(sys, "argv", ["-", directory, "http://localhost:25080", str(ROOT / "benchmarks")]):
+                    with self.assertRaises(SystemExit) as outcome:
+                        exec(compile(completion_source, str(RUN_POINT), "exec"), {})
+                self.assertEqual(outcome.exception.code, 0 if healthy else 1)
+                self.assertEqual(json.loads((Path(directory) / "server.completion.json").read_text()), report)
+                self.assertEqual(capture.call_args.args[0][0][0], {"id": "i0"})
+                self.assertEqual(capture.call_args.args[1], ["http://localhost:25080"])
 
 
 if __name__ == "__main__":
