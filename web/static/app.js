@@ -571,7 +571,7 @@ function renderTrials() {
   }
   box.className = "table-wrap";
   var html = '<table><thead><tr>';
-  ["task", "candidate", "状态", "阶段", "class", "mode", "concurrency", "tok/s", "requests", "reasons"].forEach(function(name) {
+  ["task", "candidate", "状态", "阶段", "class", "mode", "concurrency", "tok/s", "requests", "失败原因 / 告警"].forEach(function(name) {
     html += "<th>" + escapeHtml(name) + "</th>";
   });
   html += "</tr></thead><tbody>";
@@ -586,7 +586,12 @@ function renderTrials() {
     html += "<td>" + pretty(row.concurrency) + "</td>";
     html += "<td>" + pretty(row.output_tokens_per_second) + "</td>";
     html += "<td>" + pretty(row.successes) + " / " + pretty(row.request_count) + "</td>";
-    html += "<td>" + escapeHtml(pretty(row.reasons || [])) + "</td>";
+    var warnings = row.warnings || [];
+    html += "<td>" + escapeHtml(pretty(row.reasons || []));
+    if (warnings.length) html += '<div class="small">告警：' + escapeHtml(warnings.map(function(warning) {
+      return warning === "memory_allocation_oom_observed" ? "检测到显存/内存分配 OOM 日志；不单独代表本轮失败" : warning;
+    }).join("；")) + '</div>';
+    html += "</td>";
     html += "</tr>";
   });
   html += "</tbody></table>";

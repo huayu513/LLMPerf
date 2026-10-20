@@ -163,6 +163,30 @@ def http_ok(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def capture_server_completion(
+    started: list[tuple[dict[str, Any], dict[str, str]]], base_urls: list[str],
+) -> dict[str, Any]:
+    instances = []
+    for (instance, env), base_url in zip(started, base_urls):
+        item = {"id": instance["id"], "base_url": base_url, "process_alive": False, "healthy": False}
+        try:
+            status = subprocess.run(
+                ["bash", str(LAUNCHER), "status"], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False, timeout=10,
+            )
+            item["process_alive"] = status.returncode == 0
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            item["status_error"] = type(exc).__name__
+        if item["process_alive"]:
+            item["healthy"] = http_ok(base_url.rstrip("/") + "/health", timeout=5.0)
+        instances.append(item)
+    return {
+        "schema_version": 1, "scope": "after_replay_before_stop",
+        "captured_at": datetime.now(timezone.utc).isoformat(), "instances": instances,
+    }
+
+
 def http_json(url: str, timeout: float = 10.0) -> tuple[bool, dict[str, Any]]:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -465,6 +489,13 @@ def main() -> int:
             os.chmod(results_root / "replay.command.sh", 0o755)
             final_exit = subprocess.run(command).returncode
             final_state = "complete" if final_exit == 0 else "failed"
+            if final_exit == 0:
+                completion = capture_server_completion(started, base_urls)
+                atomic_json(results_root / "server.completion.json", completion)
+                if any(not item["process_alive"] or not item["healthy"] for item in completion["instances"]):
+                    print("server completion check failed after replay", file=sys.stderr)
+                    final_exit = 1
+                    final_state = "failed"
     finally:
         stop_exit = 0
         if not args.keep_server:

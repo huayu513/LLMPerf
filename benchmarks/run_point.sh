@@ -500,4 +500,16 @@ if [[ "$enable_gpu_monitor" == "1" ]] && command -v nvidia-smi >/dev/null 2>&1; 
 fi
 
 "$REPLAY" "${replay_args[@]}" --output-dir "$output_dir"
+"$manifest_python" - "$output_dir" "$base_url" "$SCRIPT_DIR" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[3])
+from run_deployment_point import atomic_json, capture_server_completion
+
+completion = capture_server_completion([({"id": "i0"}, dict(os.environ))], [sys.argv[2]])
+atomic_json(Path(sys.argv[1]) / "server.completion.json", completion)
+sys.exit(0 if all(item["process_alive"] and item["healthy"] for item in completion["instances"]) else 1)
+PY
 grep -Ei 'resolved|ready to roll|chunked|dp attention|moe|dspark|oom|retract'   "${output_dir}/server.log" > "${output_dir}/server.resolved.log" || true

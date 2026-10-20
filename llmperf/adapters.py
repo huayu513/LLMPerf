@@ -321,6 +321,7 @@ def _evidence_fingerprint(artifact_dir: Path, summary_path: Path | None, attempt
     if any(path is None or not path.is_file() for path in paths[:5]):
         return None
     paths.extend(sorted((artifact_dir / "instances").glob("*/server.*.json")))
+    paths.append(artifact_dir / "server.completion.json")
     digest = hashlib.sha256()
     for role, path in enumerate(paths):
         if path is not None and path.is_file():
@@ -362,29 +363,42 @@ _OOM_LOG_RE = re.compile(
     r"\b(?:out[\s_-]*of[\s_-]*memory|outofmemoryerror|oom(?:[\s_-]*killed)?)\b",
     re.IGNORECASE,
 )
+_OOM_KILLED_LOG_RE = re.compile(r'''\boom[\s_-]*killed\b(?!["']?\s*[:=]\s*(?:false|0)\b)''', re.IGNORECASE)
+_SERVER_FATAL_LOG_RE = re.compile(
+    r"\b(?:engine\s*core|worker(?:proc)?|scheduler)(?:_[A-Za-z0-9]+)*\b[^\n]{0,160}"
+    r"(?:\b(?:died|exited|terminated)\s+unexpectedly\b|\bfailed\s+to\s+start\b)",
+    re.IGNORECASE,
+)
 
 
-def _oom_log_paths(attempt_path: Path) -> tuple[Path, ...]:
-    """Return attempt logs that contain an out-of-memory diagnostic.
-
-    Startup OOMs often leave no replay summary or server evidence, so the
-    absence of those artifacts cannot distinguish them from an incompatible
-    launch.  The controller and every deployment instance write diagnostics
-    below the attempt directory; inspect only log files and stream them line
-    by line so a large server log does not need to be loaded into memory.
-    """
-
-    matches: list[Path] = []
+def _server_log_diagnostics(attempt_path: Path) -> dict[str, Any]:
+    """Separate allocation diagnostics from explicit process termination evidence."""
+    diagnostics: dict[str, Any] = {
+        "oom_log_paths": [], "oom_kill_log_paths": [],
+        "fatal_server_log_paths": [], "log_excerpts": [],
+    }
     for path in sorted(attempt_path.rglob("*.log")):
-        if not path.is_file():
+        if not path.is_file() or not path.resolve().is_relative_to(attempt_path.resolve()):
             continue
         try:
+            matched = set()
             with path.open("r", encoding="utf-8", errors="replace") as source:
-                if any(_OOM_LOG_RE.search(line) for line in source):
-                    matches.append(path)
+                for number, line in enumerate(source, 1):
+                    allocation_oom = _OOM_LOG_RE.search(line)
+                    fatal_process = _SERVER_FATAL_LOG_RE.search(line)
+                    if allocation_oom:
+                        matched.add("oom_log_paths")
+                    if _OOM_KILLED_LOG_RE.search(line):
+                        matched.add("oom_kill_log_paths")
+                    if fatal_process:
+                        matched.add("fatal_server_log_paths")
+                    if (allocation_oom or fatal_process) and len(diagnostics["log_excerpts"]) < 6:
+                        diagnostics["log_excerpts"].append({"path": str(path), "line": number, "text": line.strip()[:1200]})
+            for kind in matched:
+                diagnostics[kind].append(str(path))
         except OSError:
             continue
-    return tuple(matches)
+    return diagnostics
 
 
 def _failure_phase(
@@ -854,6 +868,7 @@ def read_attempt(
         "engine": metadata.get("engine", "sglang"),
         "status": "INCONCLUSIVE",
         "reasons": [],
+        "warnings": [],
         "output_tokens_per_second": 0.0,
         # This is intentionally narrower than ``failure_phase=startup``.
         # Only explicit parameter evidence for an explicit MoE runner may
@@ -874,12 +889,13 @@ def read_attempt(
         result["failure_kind"] = "timeout"
         reasons.append("trial_deadline_exceeded")
     oom_marker = attempt_path / "container-oom-killed"
-    oom_logs = _oom_log_paths(attempt_path)
-    if oom_marker.is_file() or oom_logs:
-        result["failure_kind"] = "oom"
-        result["oom_log_paths"] = [str(path) for path in oom_logs]
-        result["container_oom_killed"] = oom_marker.is_file()
-        reasons.append("out_of_memory")
+    diagnostics = _server_log_diagnostics(attempt_path)
+    oom_logs = diagnostics["oom_log_paths"]
+    result["container_oom_killed"] = oom_marker.is_file()
+    if oom_logs:
+        result["oom_log_paths"] = oom_logs
+    if diagnostics["fatal_server_log_paths"]:
+        reasons.append("server_process_failure")
     if exit_code != 0:
         reasons.append(f"process_exit_{exit_code}")
     if len(summaries) > 1:
@@ -888,6 +904,22 @@ def read_attempt(
         reasons.append("summary_missing" if summary_path is None else "summary_invalid")
     if controller is None or controller.get("state") != "complete" or controller.get("exit_code") != 0:
         reasons.append("controller_completion_missing")
+    completion_path = artifact_dir / "server.completion.json"
+    completion = _load_json_object(completion_path)
+    if completion_path.is_file():
+        instances = completion.get("instances") if completion is not None else None
+        expected_instances = evidence.get("instances") if evidence is not None else None
+        expected_count = len(expected_instances) if isinstance(expected_instances, list) else 1
+        if not isinstance(instances, list) or not instances or len(instances) != expected_count or any(
+            not isinstance(instance, Mapping) or not isinstance(instance.get("id"), str)
+            or instance.get("process_alive") is not True
+            or instance.get("healthy") is not True for instance in instances
+        ):
+            reasons.append("server_completion_invalid")
+        elif isinstance(expected_instances, list) and sorted(
+            instance["id"] for instance in instances
+        ) != sorted(str(instance.get("id")) for instance in expected_instances if isinstance(instance, Mapping)):
+            reasons.append("server_completion_invalid")
     computed_unsupported: list[str] = []
     computed_mismatched: list[str] = []
     if evidence is None:
@@ -1073,6 +1105,18 @@ def read_attempt(
         if not urls or any(not _local_loopback_url(url, allowed_ports) for url in urls):
             reasons.append("formal_url_not_loopback")
 
+    replay_failed = summary is not None and type(summary.get("failures")) is int and summary["failures"] > 0
+    oom_failure = oom_marker.is_file() or diagnostics["oom_kill_log_paths"] or (
+        oom_logs and result.get("failure_kind") != "timeout" and (
+            exit_code != 0 or replay_failed or summary is None
+            or "server_process_failure" in reasons or "server_completion_invalid" in reasons
+        )
+    )
+    if oom_failure:
+        result["failure_kind"] = "oom"
+        reasons.append("out_of_memory")
+    elif oom_logs:
+        result["warnings"].append("memory_allocation_oom_observed")
     result["reasons"] = list(dict.fromkeys(reasons))
     if evidence is not None and (evidence.get("unsupported_parameters") or computed_unsupported):
         result["status"] = "UNSUPPORTED"
@@ -1080,6 +1124,12 @@ def read_attempt(
         result["status"] = "FAILED"
     elif not result["reasons"]:
         result["status"] = "VALID"
+    if oom_logs or oom_marker.is_file() or diagnostics["fatal_server_log_paths"]:
+        result["memory_diagnostics"] = {
+            **diagnostics, "oom_log_detected": bool(oom_logs),
+            "container_oom_killed": oom_marker.is_file(), "phase": "unknown",
+            "trial_completed": result["status"] == "VALID",
+        }
     if result["status"] != "VALID":
         phase = _failure_phase(result["status"], result["reasons"], summary, evidence)
         if phase is not None:
