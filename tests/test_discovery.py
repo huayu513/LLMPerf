@@ -227,8 +227,10 @@ class DiscoveryTests(unittest.TestCase):
     def test_unknown_or_incomplete_model_metadata_is_actionable(self):
         unknown = self.model_dir(
             "mystery", model_type="mystery", architectures=["MysteryForCausalLM"])
-        with self.assertRaisesRegex(ConfigError, "model_overrides"):
-            discover_model(unknown)
+        model = discover_model(unknown)
+        self.assertEqual(model.raw["family"], "generic")
+        self.assertFalse(model.raw["protocol"]["runtime_verified"])
+        self.assertEqual(model.chat_template_kwargs, {})
         incomplete = self.model_dir("incomplete", num_attention_heads=None)
         with self.assertRaisesRegex(ConfigError, "num_attention_heads"):
             discover_model(incomplete)

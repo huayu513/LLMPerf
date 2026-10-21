@@ -15,6 +15,8 @@ from typing import Any
 
 from .errors import ConfigError
 from .model_weights import inspect_model_weights
+from .model_metadata import normalize_metadata
+from .model_protocols import protocol_profile
 from .types import ModelManifest, WorkloadManifest
 
 
@@ -24,32 +26,6 @@ _OVERRIDE_KEYS = {
     "quantization", "profile_env",
 }
 
-# Automatic runs should measure the same reasoning mode for every candidate.
-# Keep this in the resolved model metadata so the setting reaches both the
-# server and any component that needs to render a chat template.
-_DEFAULT_CHAT_TEMPLATE_KWARGS = {
-    "enable_thinking": True,
-    "reasoning_effort": "max",
-    "thinking": True,
-}
-_QWEN2_TYPES = {"qwen", "qwen2", "qwen2_moe"}
-_QWEN3_TYPES = {
-    "qwen3", "qwen3_moe", "qwen3_next", "qwen3_5", "qwen3_5_text",
-    "qwen3_5_moe", "qwen3_5_moe_text",
-}
-_GLM_TYPES = {"glm4_moe", "glm4_moe_lite", "glm_moe_dsa"}
-_DEEPSEEK3_TYPES = {"deepseek_v3"}
-_DEEPSEEK4_TYPES = {"deepseek_v4"}
-_QWEN2_ARCHS = {"QWenLMHeadModel", "Qwen2ForCausalLM", "Qwen2MoeForCausalLM"}
-_QWEN3_ARCHS = {
-    "Qwen3ForCausalLM", "Qwen3MoeForCausalLM", "Qwen3NextForCausalLM",
-    "Qwen3_5ForCausalLM", "Qwen3_5MoeForCausalLM",
-}
-_GLM_ARCHS = {
-    "Glm4MoeForCausalLM", "Glm4MoeLiteForCausalLM", "GlmMoeDsaForCausalLM",
-}
-_DEEPSEEK3_ARCHS = {"DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
-_DEEPSEEK4_ARCHS = {"DeepseekV4ForCausalLM"}
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -64,12 +40,6 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
         raise ConfigError(f"invalid {label} {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ConfigError(f"{label} must contain a JSON object: {path}")
-    return value
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise ConfigError(f"model metadata {name} must be a positive integer")
     return value
 
 
@@ -187,7 +157,7 @@ def _infer_tool_parser_from_text(
             return formats[0], f"static chat template markers ({source})"
         if len(formats) > 1:
             source = f"conflicting static chat template markers ({source})"
-    elif family == "qwen3":
+    elif family in {"qwen3", "qwen4-exp"}:
         if "<function=" in template and "<parameter=" in template:
             return "qwen3_coder", f"static chat template markers ({source})"
         if "<tool_call>" in template and "</tool_call>" in template:
@@ -196,32 +166,6 @@ def _infer_tool_parser_from_text(
     raise ConfigError(
         f"cannot infer tool_call_parser for {family} from {source}; "
         "set model_overrides.tool_call_parser explicitly"
-    )
-
-
-def _classify(
-    model_type: str, architectures: tuple[str, ...]
-) -> tuple[str, str | None, str | None]:
-    arch_set = set(architectures)
-    if model_type in _DEEPSEEK4_TYPES or arch_set & _DEEPSEEK4_ARCHS:
-        return "deepseek-v4", "deepseekv4", "deepseek-v4"
-    if model_type in _DEEPSEEK3_TYPES or arch_set & _DEEPSEEK3_ARCHS:
-        tool_parser = (
-            "deepseekv32"
-            if "DeepseekV32ForCausalLM" in arch_set
-            else None
-        )
-        return "deepseek-v3", tool_parser, "deepseek-v3"
-    if model_type in _GLM_TYPES or arch_set & _GLM_ARCHS:
-        return "glm", "glm", "glm45"
-    if model_type in _QWEN3_TYPES or arch_set & _QWEN3_ARCHS:
-        return "qwen3", None, "qwen3"
-    if model_type in _QWEN2_TYPES or arch_set & _QWEN2_ARCHS:
-        return "qwen2", "qwen", None
-    details = f"model_type={model_type!r}, architectures={list(architectures)!r}"
-    raise ConfigError(
-        "unsupported model metadata (" + details + "); provide explicit "
-        "model_overrides for a supported Qwen, GLM, or DeepSeek architecture"
     )
 
 
@@ -288,7 +232,7 @@ def _quantization(metadata: dict[str, Any]) -> tuple[str | None, str]:
 def discover_model(
     model_path: Path, overrides: dict[str, Any] | None = None
 ) -> ModelManifest:
-    """Discover a supported checkpoint from static config.json metadata."""
+    """Discover static checkpoint facts; runtime support is checked separately."""
     original = str(model_path)
     path = Path(model_path).expanduser().resolve()
     if not path.is_dir():
@@ -304,6 +248,7 @@ def discover_model(
     if unknown:
         raise ConfigError(f"unknown model override keys: {', '.join(unknown)}")
     override = copy.deepcopy(supplied)
+    normalized = normalize_metadata(metadata, override)
 
     text_config = metadata.get("text_config")
     if text_config is not None and not isinstance(text_config, dict):
@@ -311,7 +256,7 @@ def discover_model(
     structural = {**metadata, **(text_config or {})}
     provenance: dict[str, str] = {}
 
-    model_type_value = override.get("model_type", metadata.get("model_type"))
+    model_type_value = override.get("model_type", metadata.get("model_type", normalized["text_model_type"]))
     if not isinstance(model_type_value, str) or not model_type_value:
         raise ConfigError("model metadata model_type must be a non-empty string")
     model_type = model_type_value.lower()
@@ -328,48 +273,37 @@ def discover_model(
         if "architectures" in override
         else "config.json:architectures"
     )
-    family, default_tool_parser, default_reasoning_parser = _classify(
-        model_type, architectures
-    )
+    protocol = protocol_profile(model_type, architectures)
+    family = protocol["id"]
+    default_tool_parser = protocol["tool_call_parser"]
+    default_reasoning_parser = protocol["reasoning_parser"]
+    template, sources = _static_chat_templates(path, metadata)
+    protocol["template_sources"] = list(sources)
+    protocol["static_template_present"] = bool(template)
     if "tool_call_parser" in override:
         tool_call_parser = _optional_string(
             override["tool_call_parser"], "tool_call_parser"
         )
         provenance["tool_call_parser"] = "model_overrides.tool_call_parser"
     else:
-        template_metadata = {**metadata}
-        template, sources = _static_chat_templates(path, template_metadata)
         if default_tool_parser is not None:
             tool_call_parser = default_tool_parser
             tool_parser_source = "unambiguous architecture mapping"
-        else:
+        elif family in {"deepseek-v3", "qwen3"} or family == "qwen4-exp" and template:
             tool_call_parser, tool_parser_source = _infer_tool_parser_from_text(
                 family, template, sources
             )
+        else:
+            tool_call_parser, tool_parser_source = None, "unknown protocol; image verification required"
         provenance["tool_call_parser"] = tool_parser_source
 
-    heads = _positive_int(
-        override.get("num_attention_heads", structural.get("num_attention_heads")),
-        "num_attention_heads",
-    )
-    layers = _positive_int(
-        override.get("num_hidden_layers", structural.get("num_hidden_layers")),
-        "num_hidden_layers",
-    )
-    provenance["num_attention_heads"] = (
-        "model_overrides.num_attention_heads"
-        if "num_attention_heads" in override
-        else "config.json:num_attention_heads"
-    )
-    provenance["num_hidden_layers"] = (
-        "model_overrides.num_hidden_layers"
-        if "num_hidden_layers" in override
-        else "config.json:num_hidden_layers"
-    )
+    heads = normalized["text"].get("num_attention_heads")
+    layers = normalized["text"].get("num_hidden_layers")
+    provenance.update(normalized["provenance"])
 
     expert_keys = ("n_routed_experts", "num_experts", "num_local_experts")
     inferred_moe = (
-        family in {"deepseek-v3", "deepseek-v4", "glm"}
+        family in {"deepseek-v3", "deepseek-v4", "deepseek-v41", "glm", "glm5-next"}
         or any(
             type(structural.get(key)) is int and structural[key] > 0
             for key in expert_keys
@@ -378,7 +312,10 @@ def discover_model(
         or any("Moe" in arch for arch in architectures)
     )
     is_moe = override.get("is_moe", inferred_moe)
-    if type(is_moe) is not bool:
+    if "is_moe" not in override and family == "generic" and not inferred_moe:
+        is_moe = None
+        normalized["unknowns"].append("moe_structure_not_declared")
+    if "is_moe" in override and type(is_moe) is not bool:
         raise ConfigError("model override is_moe must be a boolean")
     provenance["is_moe"] = (
         "model_overrides.is_moe"
@@ -386,7 +323,10 @@ def discover_model(
         else "derived from model_type, architectures, and expert metadata"
     )
 
-    quantization, quantization_source = _quantization(metadata)
+    quantization_document = (text_config if text_config and "quantization_config" in text_config else metadata)
+    quantization, quantization_source = _quantization(quantization_document)
+    if quantization_document is text_config:
+        quantization_source = quantization_source.replace("config.json:", "config.json:text_config.")
     if "quantization" in override:
         quantization = _optional_string(override["quantization"], "quantization")
         quantization_source = "model_overrides.quantization"
@@ -410,11 +350,11 @@ def discover_model(
             override["chat_template_kwargs"], "chat_template_kwargs"
         )
     else:
-        chat_template_kwargs = dict(_DEFAULT_CHAT_TEMPLATE_KWARGS)
+        chat_template_kwargs = dict(protocol["chat_template_kwargs"])
     provenance["chat_template_kwargs"] = (
         "model_overrides.chat_template_kwargs"
         if "chat_template_kwargs" in override
-        else "automatic max-thinking default"
+        else "automatic max-thinking default" if protocol["known"] else "unknown protocol; no implicit template kwargs"
     )
     profile_env = _mapping(override.get("profile_env", {}), "profile_env")
     if any(not isinstance(value, str) for value in profile_env.values()):
@@ -426,6 +366,8 @@ def discover_model(
         "model_type": model_type,
         "architectures": list(architectures),
         "family": family,
+        "normalized": normalized,
+        "protocol": protocol,
         "num_attention_heads": heads,
         "num_hidden_layers": layers,
         "is_moe": is_moe,
