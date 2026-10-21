@@ -431,6 +431,7 @@ def inspect_workload(input_path: Path) -> WorkloadManifest:
     models: Counter[str] = Counter()
     request_ids: set[str] = set()
     source_message_ids: set[str] = set()
+    requirements = {"tools": False, "multimodal": False, "streaming": False}
     try:
         with path.open("rb") as source:
             for line_number, line in enumerate(source, 1):
@@ -460,6 +461,15 @@ def inspect_workload(input_path: Path) -> WorkloadManifest:
                 request_ids.add(request_id)
                 source_message_ids.add(source_message_id)
                 models[request["model"]] += 1
+                requirements["tools"] |= bool(request.get("tools") or request.get("functions"))
+                requirements["streaming"] |= request.get("stream") is True
+                for message in request.get("messages", []):
+                    requirements["tools"] |= bool(message.get("tool_calls") or message.get("function_call"))
+                    content = message.get("content")
+                    if isinstance(content, list):
+                        requirements["multimodal"] |= any(
+                            isinstance(item, dict) and item.get("type") not in {None, "text", "input_text"}
+                            for item in content)
                 count += 1
     except (OSError, ValueError) as exc:
         raise ConfigError(f"invalid captured JSONL {path}: {exc}") from exc
@@ -482,6 +492,7 @@ def inspect_workload(input_path: Path) -> WorkloadManifest:
             "benchmarks/replay/prepare_jsonl_replay.py:validate_request"
         ),
         "source_bytes_preserved": True,
+        "requirements": requirements,
     }
     return WorkloadManifest(
         id=path.stem,

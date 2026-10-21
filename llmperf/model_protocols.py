@@ -55,7 +55,7 @@ def parser_candidates(parser, engine, kind):
         "deepseekv41": ("deepseek_v41",), "deepseek-v41": ("deepseek_v41",),
         "deepseekv3": ("deepseek_v3",), "deepseek-v3": ("deepseek_v3",),
         "deepseekv31": ("deepseek_v31",), "deepseekv32": ("deepseek_v32",),
-        "qwen": ("qwen3_json", "hermes"), "qwen25": ("qwen3_json", "hermes"),
+        "qwen": ("qwen3_json", "hermes", "qwen"), "qwen25": ("qwen3_json", "hermes", "qwen25"),
     }
     if kind == "reasoning_parser" and parser == "glm45":
         return ("glm45", "glm47")

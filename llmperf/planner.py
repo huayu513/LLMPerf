@@ -11,6 +11,7 @@ from .artifacts import write_json_atomic
 from .deployment_ports import DEPLOYMENT_PORT_STRIDE
 from .errors import ConfigError
 from .model_weights import screen_weight_capacity
+from .model_compatibility import assess_model_compatibility, require_model_compatibility
 from .engines import vllm_plan_settings
 from .feature_catalog import engine_catalog
 from .types import CandidateConfig, Plan, PlanTask
@@ -147,10 +148,12 @@ def create_search_plan(config, model, workload, env, result_dir):
     catalog['identity'] = {'image': config.image,
         'image_snapshot': env.image.to_dict() if hasattr(env.image, 'to_dict') else dict(env.image),
         'versions': env.container.get('versions', {})}
+    compatibility = assess_model_compatibility(model, env, engine, workload)
+    require_model_compatibility(compatibility)
     if engine == 'vllm':
         native, vllm_backends, parsers = vllm_plan_settings(config, model, caps)
     else:
-        native, parsers = {}, {}
+        native, parsers = {}, compatibility['parsers']
     if not options:
         raise ConfigError('cannot discover SGLang launch options from the configured image')
     required = {
@@ -159,9 +162,9 @@ def create_search_plan(config, model, workload, env, result_dir):
         '--max-running-requests', '--host', '--port', '--chunked-prefill-size',
         '--default-chat-template-kwargs',
     }
-    if model.tool_call_parser:
+    if parsers.get('tool_call_parser'):
         required.add('--tool-call-parser')
-    if model.reasoning_parser:
+    if parsers.get('reasoning_parser'):
         required.add('--reasoning-parser')
     if model.raw.get('provenance', {}).get('quantization') == 'model_overrides.quantization':
         required.add('--quantization')
@@ -173,9 +176,6 @@ def create_search_plan(config, model, workload, env, result_dir):
     missing = sorted(required - compatible) if engine == 'sglang' else []
     if missing:
         raise ConfigError('configured image lacks required SGLang launch options: ' + ', '.join(missing))
-    for parser, key in ((model.tool_call_parser, 'tool_parsers'), (model.reasoning_parser, 'reasoning_parsers')):
-        if engine == 'sglang' and parser and parser not in caps.get(key, []):
-            raise ConfigError(f'configured image does not advertise parser {parser!r}; use a compatible image or model_overrides')
     requested = tuple(config.search.backends or ())
     advertised = set(caps.get('runner_backends', []))
     if engine == 'sglang' and any(b not in advertised for b in requested):
@@ -329,6 +329,7 @@ def create_search_plan(config, model, workload, env, result_dir):
         shm_size=config.docker.shm_size, ipc=config.docker.ipc,
         candidates={c.id: asdict(c) for c in candidates},
         engine_catalog=catalog,
+        model_compatibility=compatibility,
         weight_capacity=weight_capacity,
         comparison_groups=dict(comparison_groups),
         objective='highest full-workload closed-loop output tokens/s after limited exploration and repeated validation',

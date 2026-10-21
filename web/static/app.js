@@ -361,7 +361,8 @@ function renderSummary() {
 function renderImageCapabilities(detail, metadata) {
   var box = el("image-capabilities");
   if (!box) return;
-  var catalog = metadata.engine_catalog;
+  var compatibility = detail.model_compatibility || metadata.model_compatibility;
+  var catalog = metadata.engine_catalog || (compatibility ? { engine: compatibility.engine, parameters: {} } : null);
   box.hidden = !catalog;
   if (!catalog) return;
   var parameters = Object.values(catalog.parameters || {});
@@ -386,6 +387,14 @@ function renderImageCapabilities(detail, metadata) {
     return total + ((round.request_attempts || {}).request_count || 0);
   }, 0);
   var html = '<h3>镜像原生能力（' + escapeHtml(catalog.engine) + '）</h3>';
+  if (compatibility) {
+    var compatibilityLabels = { architecture: "模型架构注册", config: "原生配置解析", tool_call_parser: "工具 parser",
+      reasoning_parser: "推理 parser", encoding: "聊天编码", quantization: "量化与 kernel", runtime: "模型运行验证" };
+    html += '<h4>模型与镜像兼容性</h4>' + renderKV(Object.entries(compatibility.checks || {}).map(function(entry) {
+      return [compatibilityLabels[entry[0]] || entry[0], entry[1].status + (entry[1].reason ? "；" + entry[1].reason : "")];
+    }));
+    html += '<p class="hint">架构注册、配置解析和 parser 名称通过，不代表 GPU 加载或聊天协议已验证。运行证据以 Trial 的协议检查和回放结果为准。</p>';
+  }
   var weights = detail.model_weights || ((metadata.model_snapshot || {}).raw || {}).weights;
   var capacity = detail.weight_capacity || metadata.weight_capacity;
   function weightBytes(value) {
@@ -463,6 +472,7 @@ function renderImageCapabilities(detail, metadata) {
   }
   html += '<div class="button-row compact">';
   var capabilityArtifacts = ["engine-capabilities.json", "capability-analysis.json", "native-preflight.json"];
+  if (compatibility) capabilityArtifacts.push("model-compatibility.json");
   if (weights) capabilityArtifacts.push("model-weights.json");
   if (capacity) capabilityArtifacts.push("weight-capacity.json");
   capabilityArtifacts.forEach(function(path) {
