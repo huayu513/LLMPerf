@@ -491,6 +491,10 @@ if [[ "$evidence_resolved" != "true" ]]; then
   echo "server parameter evidence did not resolve; skipping replay" >&2
   exit 0
 fi
+if [[ -n "${S1_PROTOCOL_VALIDATION:-}" ]]; then
+  "$manifest_python" "$SCRIPT_DIR/server/protocol_check.py" --base-url "$base_url" \
+    --model "$SERVED_MODEL_NAME" --output "$output_dir/server.protocol.json"
+fi
 grep -Ei 'resolved|ready to roll|chunked|dp attention|moe|dspark'   "${output_dir}/server.log" > "${output_dir}/server.resolved.log" || true
 
 if [[ "$enable_gpu_monitor" == "1" ]] && command -v nvidia-smi >/dev/null 2>&1; then

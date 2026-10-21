@@ -598,8 +598,12 @@ function renderTrials() {
     html += "<td>" + pretty(row.successes) + " / " + pretty(row.request_count) + "</td>";
     var warnings = row.warnings || [];
     html += "<td>" + escapeHtml(pretty(row.reasons || []));
+    if (row.protocol_validation) html += '<div class="small">' +
+      (row.model_runtime_verified ? "文本协议检查通过（非质量验证）" : "模型协议尚未验证完整") + '</div>';
     if (warnings.length) html += '<div class="small">告警：' + escapeHtml(warnings.map(function(warning) {
-      return warning === "memory_allocation_oom_observed" ? "检测到显存/内存分配 OOM 日志；不单独代表本轮失败" : warning;
+      if (warning === "memory_allocation_oom_observed") return "检测到显存/内存分配 OOM 日志；不单独代表本轮失败";
+      if (warning === "protocol_validation_incomplete") return "协议检查证据不完整；吞吐有效不代表模型语义已验证";
+      return warning;
     }).join("；")) + '</div>';
     html += "</td>";
     html += "</tr>";

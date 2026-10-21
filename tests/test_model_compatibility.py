@@ -78,6 +78,13 @@ class ModelMetadataTests(unittest.TestCase):
         self.assertEqual(parser_candidates("deepseek-v41", "vllm", "reasoning_parser"), ("deepseek_v41",))
         self.assertNotIn("deepseek_v4", parser_candidates("deepseekv41", "vllm", "tool_call_parser"))
 
+    def test_qwen_flash_xml_template_selects_xml_parser_not_json_parser(self):
+        (self.root / "chat_template.jinja").write_text("<tool_call><function=name><parameter=value>")
+        model = self.discover({"model_type": "qwen4_exp", "text_config": {
+            "num_hidden_layers": 48, "num_attention_heads": 24}})
+        self.assertEqual(model.tool_call_parser, "qwen3_coder")
+        self.assertEqual(model.chat_template_kwargs, {"enable_thinking": True, "reasoning_effort": "max"})
+
 
 class OfficialCheckpointTests(unittest.TestCase):
     def test_official_snapshots_are_pinned_and_unchanged(self):

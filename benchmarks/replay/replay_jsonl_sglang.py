@@ -272,7 +272,7 @@ def observe_response_item(
         if not isinstance(delta, dict):
             delta = choice.get("message") if isinstance(choice.get("message"), dict) else {}
         has_activity = False
-        reasoning = delta.get("reasoning_content")
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if not isinstance(reasoning, str) or not reasoning:
             reasoning = delta.get("reasoning")
         content = delta.get("content")
