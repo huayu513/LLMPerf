@@ -16,13 +16,13 @@
   "engine_options": {
     "gpu_memory_utilization": 0.9,
     "max_num_seqs": 64,
-    "max_num_batched_tokens": 4096,
+    "max_num_batched_tokens": 16384,
     "enforce_eager": false
   },
   "search": {
     "start_concurrency": 8,
     "concurrency_max": 64,
-    "max_seconds": 86400,
+    "max_seconds": 864000,
     "max_trials": 666,
     "adaptive": {
       "max_advisor_calls": 66,
@@ -31,7 +31,7 @@
   },
   "advisor": {
     "base_url": "http://10.64.39.63:54321/v1/chat/completions",
-    "model": "DeepSeek-V4-Flash-Local",
+    "model": "DeepSeek-V4-Flash-Local-Reasoning",
     "authorization": "Bearer <你的实际令牌>",
     "timeout_seconds": 2000,
     "thinking": true,
