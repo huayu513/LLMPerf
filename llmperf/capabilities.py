@@ -195,15 +195,18 @@ _HELP_BEGIN = "S1SLOW_SGLANG_HELP_BEGIN\n"
 _HELP_END = "S1SLOW_SGLANG_HELP_END"
 
 
-def _container_probe(engine: str) -> str:
+def _container_probe(engine: str, *, model_config: bool = False) -> str:
     if engine not in {"sglang", "vllm"}:
         raise ValueError(f"unsupported engine: {engine}")
     script = _CONTAINER_PROBE if engine == "sglang" else (_CONTAINER_PROBE.replace("sglang", "vllm")
             .replace("SGLANG", "VLLM")
             .replace('["vllm","serve","--help"]', '["vllm","serve","--help=all"]'))
     source = (Path(__file__).resolve().parents[1] / "benchmarks/server/image_capabilities.py").read_text()
+    model_source = (Path(__file__).resolve().parents[1] / "benchmarks/server/model_capabilities.py").read_text()
     return script.replace('print("S1SLOW_PROBE_JSON="',
                           f'exec({source!r})\nfacts["argument_schema"]=collect_schema({engine!r})\n'
+                          f'exec({model_source!r})\nfacts["model_support"]=collect_model_support('
+                          f'{engine!r}, {"/tmp/llmperf-model" if model_config else None!r})\n'
                           'print("S1SLOW_PROBE_JSON="')
 
 
@@ -261,7 +264,9 @@ def _parse_vllm_capabilities(help_text: str) -> dict[str, list[str]]:
 
 def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) -> EnvironmentSnapshot:
     engine = getattr(config, "engine", "sglang")
-    probe_script = _container_probe(engine)
+    model_config_path = Path(config.paths.model_host) / "config.json"
+    has_model_config = model_config_path.is_file()
+    probe_script = _container_probe(engine, model_config=has_model_config)
     commands: list[Tuple[str, ...]] = []
     reasons: list[str] = []
     checks: list[Mapping[str, Any]] = []
@@ -332,6 +337,9 @@ def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) ->
         )
         probe_args=["docker", "run", "--rm", "--gpus", gpu_request, "--ipc="+ipc,
                     "--shm-size", shm, "--network", network]
+        if has_model_config:
+            probe_args += ["-v", str(model_config_path) + ":/tmp/llmperf-model/config.json:ro",
+                           "-e", "HF_HUB_OFFLINE=1", "-e", "TRANSFORMERS_OFFLINE=1"]
         if engine == "vllm":
             probe_args += ["--entrypoint", "python3", config.image, "-c", probe_script]
         else:
@@ -350,6 +358,13 @@ def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) ->
             "tool_parsers": [], "reasoning_parsers": [],
         }
         schema = probe_facts.get("argument_schema")
+        model_support = probe_facts.get("model_support", {})
+        for key in ("tool_parsers", "reasoning_parsers"):
+            observed = model_support.get("parsers", {}).get(key, {})
+            if observed:
+                capabilities.setdefault("parser_registry", {})[key] = observed
+            if observed.get("status") == "discovered":
+                capabilities[key] = sorted(set(capabilities[key]) | set(observed.get("choices", [])))
         if isinstance(schema, dict):
             capabilities["schema"] = schema
             parameters = schema.get("parameters", {})
@@ -377,6 +392,7 @@ def probe_environment(config: Any, runner: CommandRunner = subprocess_runner) ->
             "cuda_available": probe_facts.get("cuda_available"),
             "cuda_device_count": probe_facts.get("cuda_device_count"),
             "capabilities": capabilities,
+            "model_support": model_support,
         }
         if not cuda_ok:
             reasons.append("container CUDA runtime unavailable")

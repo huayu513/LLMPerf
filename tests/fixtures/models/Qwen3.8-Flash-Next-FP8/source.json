@@ -1,0 +1,8 @@
+{
+  "id": "Qwen/Qwen3.8-Flash-Next-FP8",
+  "sha": "236dfdf285828023ca3bcd3f37366c58a3469b13",
+  "lastModified": "2026-08-31T08:19:15.000Z",
+  "config_sha256": "d0466f1f82b42a094751aa230c0f5dcee3c5829ce68f82e8be5a27ce6a13e91c",
+  "original_config_sha256": "c22eb0a053eed62e18f0184d3ca62d3798f208c3e00b9feee939fc3dbacdc8ca",
+  "fixture_format": "JSON reserialized with jq; values unchanged"
+}

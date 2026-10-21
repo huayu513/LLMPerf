@@ -28,6 +28,7 @@ from .discovery import discover_model, inspect_workload, prepare_workload
 from .docker_runtime import DockerRuntime, DockerTaskSpec, Mount
 from .errors import ConfigError
 from .model_weights import capacity_summary, weight_summary, write_model_analysis
+from .model_compatibility import assess_model_compatibility, require_model_compatibility
 from .planner import _jsonable, create_search_plan, fingerprint, plan_to_dict, write_plan
 from .scene_workload import create_scene_workload
 from .search import collect_results
@@ -233,6 +234,9 @@ def _prepare_new_run(config_path: Path, config: RunConfig, *, use_captured: bool
     write_json_atomic(root / "environment.json", env.to_dict())
     if env.status == "FAIL":
         raise ConfigError(f"environment checks failed; see {root / 'environment.json'}")
+    compatibility = assess_model_compatibility(model, env, config.engine, workload)
+    write_json_atomic(root / "model-compatibility.json", compatibility)
+    require_model_compatibility(compatibility)
     calibration = None
     if not use_captured and calibrate:
         calibration = _calibrate_scene(root, config, model, scene)
@@ -439,7 +443,7 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
     template.metadata["capability_proposal_outcomes"] = proposal_outcomes(
         template.metadata.get("capability_analysis", {}), selected.values(), template.metadata["engine_catalog"])
     template.metadata["capability_artifacts"] = {name: sha256_file(root / name) for name in
-        ("engine-capabilities.json", "capability-analysis.json", "native-preflight.json",
+        ("engine-capabilities.json", "capability-analysis.json", "native-preflight.json", "model-compatibility.json",
          "model-weights.json", "weight-capacity.json") if (root / name).is_file()}
     effective_search = replace(config.search, concurrency_max=scene["target_concurrency"],
                                start_concurrency=scene["target_concurrency"])

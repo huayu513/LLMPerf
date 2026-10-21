@@ -261,6 +261,7 @@ class VLLMTests(unittest.TestCase):
         spec = ReplayAdapter(metadata, self.root / "run").build_spec(task, 1)
         output = self.root / "controller"
         env = {**os.environ, **spec.env, "S1_RESULTS_ROOT": str(output)}
+        env["S1_PROTOCOL_VALIDATION"] = json.dumps({"version": 1})
         config = json.loads(spec.env["S1_VLLM_CONFIG"])
         info = native_info(config)
         calls = []
@@ -281,10 +282,15 @@ class VLLMTests(unittest.TestCase):
         def health(url, **kwargs):
             urls[url] = urls.get(url, 0) + 1
             return urls[url] > 1
+        def protocol(url, model, specification):
+            calls.append(["protocol", url])
+            return {"version": 1, "status": "PASS", "runtime_verified": True,
+                    "cases": [{"case": "chat", "status": "PASS"}]}
         with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", [
             "controller", "formal", "--profile", "AUTO", "--concurrency", "4"]), \
                 patch.object(controller, "http_ok", side_effect=health), \
                 patch.object(controller, "http_json", side_effect=fetch), \
+                patch.object(controller, "validate_protocol", side_effect=protocol), \
                 patch.object(controller.subprocess, "run", side_effect=execute):
             self.assertEqual(controller.main(), 0)
         evidence = json.loads((output / "server.evidence.json").read_text())
@@ -296,6 +302,12 @@ class VLLMTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in completion["instances"]], ["i0", "i1"])
         self.assertTrue(all(item["process_alive"] and item["healthy"] for item in completion["instances"]))
         replay_index = next(offset for offset, command in enumerate(calls) if command[1] == str(controller.REPLAY))
+        protocol_indexes = [offset for offset, command in enumerate(calls) if command[0] == "protocol"]
+        self.assertEqual(len(protocol_indexes), 2)
+        self.assertTrue(all(offset < replay_index for offset in protocol_indexes))
+        protocol_report = json.loads((output / "server.protocol.json").read_text())
+        self.assertTrue(protocol_report["runtime_verified"])
+        self.assertEqual([row["id"] for row in protocol_report["instances"]], ["i0", "i1"])
         status_indexes = [offset for offset, command in enumerate(calls) if command[0] == "bash" and command[2] == "status"]
         stop_index = next(offset for offset, command in enumerate(calls) if command[0] == "bash" and command[2] == "stop")
         self.assertTrue(all(replay_index < offset < stop_index for offset in status_indexes))

@@ -19,6 +19,7 @@ from .errors import ConfigError
 from .feature_catalog import native_contract
 from .types import DockerConfig, PlanTask
 from benchmarks.server.vllm_config import launch_config, normalized_speculation, requested_parameters, server_parameters
+from benchmarks.server.protocol_check import report_is_valid
 
 
 _LINE_ENDING_NORMALIZED_SUFFIXES = frozenset({".env", ".py", ".sh"})
@@ -322,6 +323,7 @@ def _evidence_fingerprint(artifact_dir: Path, summary_path: Path | None, attempt
         return None
     paths.extend(sorted((artifact_dir / "instances").glob("*/server.*.json")))
     paths.append(artifact_dir / "server.completion.json")
+    paths.append(artifact_dir / "server.protocol.json")
     digest = hashlib.sha256()
     for role, path in enumerate(paths):
         if path is not None and path.is_file():
@@ -356,6 +358,9 @@ _STARTUP_FAILURE_REASONS = frozenset({
     "requested_server_parameters_mismatch",
     "server_evidence_inconsistent",
     "resolved_parameters_missing",
+    "protocol_validation_missing",
+    "protocol_validation_failed",
+    "protocol_validation_invalid",
 })
 
 
@@ -580,6 +585,8 @@ class ReplayAdapter:
         model_snapshot = self._value("model_snapshot", default={})
         model_raw = model_snapshot.get("raw", {}) if isinstance(model_snapshot, Mapping) else {}
         env["MODEL_IS_MOE"] = "1" if isinstance(model_raw, Mapping) and bool(model_raw.get("is_moe")) else "0"
+        if self.metadata.get("protocol_validation"):
+            env["S1_PROTOCOL_VALIDATION"] = json.dumps(self.metadata["protocol_validation"], sort_keys=True)
         for source, target in {
             "tool_call_parser": "TOOL_CALL_PARSER",
             "reasoning_parser": "REASONING_PARSER",
@@ -904,6 +911,27 @@ def read_attempt(
         reasons.append("summary_missing" if summary_path is None else "summary_invalid")
     if controller is None or controller.get("state") != "complete" or controller.get("exit_code") != 0:
         reasons.append("controller_completion_missing")
+    protocol = _load_json_object(artifact_dir / "server.protocol.json")
+    result["model_runtime_verified"] = False
+    if metadata.get("protocol_validation"):
+        result["protocol_validation"] = protocol
+        if protocol is None:
+            reasons.append("protocol_validation_missing")
+        else:
+            instances = protocol.get("instances")
+            deployment = static.get("deployment", {})
+            expected_ids = [str(item["id"]) for item in deployment.get("instances", [])] or ["i0"]
+            valid = report_is_valid(protocol, metadata["protocol_validation"], expected_ids)
+            if not valid:
+                reasons.append("protocol_validation_invalid")
+            elif protocol["status"] == "FAIL" or any(item.get("status") == "FAIL" for item in instances):
+                reasons.append("protocol_validation_failed")
+            elif protocol["status"] == "PASS" and protocol.get("runtime_verified") is True and all(
+                    item.get("runtime_verified") is True and item.get("status") == "PASS" and
+                    all(row.get("status") == "PASS" for row in item["cases"]) for item in instances):
+                result["model_runtime_verified"] = True
+            else:
+                result["warnings"].append("protocol_validation_incomplete")
     completion_path = artifact_dir / "server.completion.json"
     completion = _load_json_object(completion_path)
     if completion_path.is_file():

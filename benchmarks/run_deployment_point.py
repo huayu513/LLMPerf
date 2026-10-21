@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Any
 if __package__:
     from .server.vllm_config import normalized_speculation, server_parameters
+    from .server.protocol_check import deployment_report, validate_protocol
 else:
     from server.vllm_config import normalized_speculation, server_parameters
+    from server.protocol_check import deployment_report, validate_protocol
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -452,6 +454,15 @@ def main() -> int:
             "instances": instance_evidence,
         }
         atomic_json(results_root / "server.evidence.json", evidence)
+        specification = os.environ.get("S1_PROTOCOL_VALIDATION")
+        if evidence["resolved"] and specification:
+            protocol_instances = []
+            for offset, instance in enumerate(instances):
+                protocol_instances.append({"id": str(instance["id"]), **validate_protocol(
+                    base_urls[offset], os.environ["SERVED_MODEL_NAME"], json.loads(specification))})
+                atomic_json(results_root / "server.protocol.json", deployment_report(protocol_instances))
+            if any(row["status"] == "FAIL" for row in protocol_instances):
+                die("server protocol validation failed; inspect server.protocol.json")
         if not evidence["resolved"]:
             print("server parameter evidence did not resolve; skipping replay", file=sys.stderr)
             final_exit = 0

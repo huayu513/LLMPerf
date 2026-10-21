@@ -15,6 +15,7 @@ from .configuration import load_config
 from .discovery import discover_model, inspect_workload, prepare_workload
 from .errors import ConfigError
 from .model_weights import write_model_analysis
+from .model_compatibility import assess_model_compatibility, require_model_compatibility
 from .planner import _jsonable, create_search_plan, fingerprint, load_plan, write_plan
 from .search import execute_search
 from .types import DockerConfig, PathConfig
@@ -61,8 +62,12 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     write_json_atomic(root / 'environment.json', env.to_dict())
     if env.status == 'FAIL':
         raise ConfigError(f'environment checks failed; see {root / "environment.json"}')
+    compatibility = assess_model_compatibility(model, env, config.engine, workload)
+    write_json_atomic(root / 'model-compatibility.json', compatibility)
+    require_model_compatibility(compatibility)
     if stop_after == 'doctor':
-        return {'command': stop_after, 'status': env.status, 'result_dir': str(root)}
+        return {'command': stop_after, 'status': env.status, 'result_dir': str(root),
+                'model_compatibility': compatibility['status'], 'runtime_verified': False}
     index = prepare_workload(config.input_path, root / 'data' / 'replay_index.json')
     if index.get('jsonl_sha256') != workload.sha256 or index.get('count') != workload.raw['count']:
         raise ConfigError('input changed while preparing the replay index; start a new run')
@@ -111,7 +116,8 @@ def run_workflow(config_path, *, stop_after='auto', probe=probe_environment, exe
     preflight = preflight_candidates(plan, config, root)
     plan.metadata['native_preflight'] = preflight
     plan.metadata['capability_artifacts'] = {name: sha256_file(root / name) for name in
-        ('engine-capabilities.json', 'native-preflight.json', 'model-weights.json', 'weight-capacity.json')
+        ('engine-capabilities.json', 'native-preflight.json', 'model-weights.json', 'weight-capacity.json',
+         'model-compatibility.json')
         if (root / name).is_file()}
     rejected = {row['id'] for row in preflight['results'] if row.get('status') == 'parser_rejected'}
     plan = replace(plan, candidates=tuple(candidate for candidate in plan.candidates if candidate.id not in rejected))

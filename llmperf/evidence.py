@@ -47,12 +47,17 @@ def candidate_summary(candidate: dict) -> dict:
 def environment_summary(metadata: dict) -> dict:
     model = metadata.get("model_snapshot", {})
     raw = model.get("raw", {})
+    normalized = raw.get("normalized", {})
     weights = raw.get("inventory", {}).get("weight_files", [])
     environment = metadata.get("environment", {})
     return redact({
         "model": {"quantization": model.get("quantization"),
                   **{key: raw.get(key) for key in
                      ("model_type", "is_moe", "num_attention_heads", "num_hidden_layers")},
+                  "protocol": raw.get("protocol", {}).get("id"),
+                  "attention": normalized.get("attention"),
+                  "quantization_details": normalized.get("quantization"),
+                  "unknowns": normalized.get("unknowns", []),
                   "weight_bytes": sum(row.get("size", 0) for row in weights)},
         "gpus": environment.get("gpus", []),
         "topology": environment.get("topology", {}),
@@ -69,8 +74,20 @@ def summarize_trial(result: dict, candidate: dict, root: Path) -> dict:
                 "latency_seconds", "ttft_seconds", "tpot_seconds", "error_rate",
                 "scene_lengths", "failure_kind", "failure_phase", "container_oom_killed",
                 "backend_unsupported", "reasons", "warnings", "memory_diagnostics", "oom_log_paths",
-                "measured_seconds", "trial_seconds")
+                "measured_seconds", "trial_seconds", "model_runtime_verified")
                if key in result}
+    protocol = result.get("protocol_validation")
+    if isinstance(protocol, dict):
+        instances = protocol.get("instances")
+        instances = instances if isinstance(instances, list) else []
+        summary["protocol_validation"] = {
+            "status": protocol.get("status"),
+            "instances": [{"id": instance.get("id"), "status": instance.get("status"),
+                           "cases": [{"case": row.get("case"), "status": row.get("status")}
+                                     for row in (instance.get("cases") or []) if isinstance(row, dict)]}
+                          for instance in instances if isinstance(instance, dict)
+                          and isinstance(instance.get("cases", []), list)],
+        }
     summary["planned_configuration"] = candidate_summary(candidate)
     effective = result.get("effective_static_config")
     if isinstance(effective, dict):

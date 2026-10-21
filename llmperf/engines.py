@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .errors import ConfigError
+from .model_compatibility import resolve_parsers
 
 
 def vllm_plan_settings(config, model, capabilities):
@@ -28,15 +29,12 @@ def vllm_plan_settings(config, model, capabilities):
                 "--default-chat-template-kwargs"}
     required.update("--" + key.replace("_", "-") for key, value in native.items()
                     if value is not False and value is not None)
-    parsers = {}
-    mapping = {"deepseekv4": "deepseek_v4", "deepseek-v4": "deepseek_v4",
-               "deepseekv3": "deepseek_v3", "deepseek-v3": "deepseek_v3",
-               "deepseekv31": "deepseek_v31", "deepseekv32": "deepseek_v32"}
+    parsers, parser_checks = resolve_parsers(model, "vllm", capabilities)
     provenance = model.raw.get("provenance", {})
     for key, catalog in (("tool_call_parser", "tool_parsers"), ("reasoning_parser", "reasoning_parsers")):
-        value = getattr(model, key)
-        if provenance.get(key) != f"model_overrides.{key}":
-            value = mapping.get(value, value)
+        value = parsers[key]
+        if parser_checks[key]["status"] == "UNSUPPORTED":
+            raise ConfigError(parser_checks[key]["reason"])
         if value:
             required.add("--" + key.replace("_", "-"))
             advertised = capabilities.get(catalog, [])
