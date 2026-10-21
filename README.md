@@ -2,6 +2,8 @@
 
 只维护 `configs/experiment.json`，用一条命令完成模型识别、环境检查、输入索引、参数搜索、重复验证和结果收集。`LLMPerf/` 可单独复制到目标机器，不依赖旁边的 sglang 或其他 benchmarks 目录。
 
+模型适配分为元数据归一化、协议画像、镜像原生能力和运行时验证，不再依靠旧架构白名单拒绝新模型。DeepSeek V4.1、Qwen Flash、GLM Flash 的配置差异、镜像要求及迁移步骤见 [模型兼容与迁移](docs/model-compatibility.md)。静态识别成功不代表旧镜像已支持新权重。
+
 ## 场景驱动智能调优（新模式）
 
 `auto` 保留不调用大模型的规则搜索入口，镜像能力探测和原生功能对照与智能调优同步升级。智能调优用同一个 `experiment.json` 中的模型、镜像、GPU 和搜索预算，默认回放 `input_path` 的原始 JSONL；只有显式选择合成负载时才可以省略 `input_path`。管理员先在其中配置隔离区的 OpenAI 兼容大模型接口：
@@ -123,7 +125,7 @@ python3 benchctl.py plan --config configs/experiment.vllm.json
 python3 benchctl.py auto --config configs/experiment.vllm.json
 ```
 
-先替换示例中的镜像摘要、模型、输入和输出路径。`doctor` 只检查环境与 CLI，不证明模型能加载；`auto` 才启动服务并回放。程序直接只读挂载原始 checkpoint，不执行权重转换。示例固定 TP=8、DP=1、PP=1，避免先枚举明显装不下模型的较小实例；删除三个并行度设置可恢复拓扑搜索。示例开启 smoke，正式结果需设置 `smoke: false`。
+先替换示例中的镜像摘要、模型、输入和输出路径。`doctor` 检查环境、CLI、镜像模型注册表、config 解析及 parser，不加载权重、不证明 GPU 推理可用；`auto` 才启动服务并回放。程序直接只读挂载原始 checkpoint，不执行权重转换。示例固定 TP=8、DP=1、PP=1，避免先枚举明显装不下模型的较小实例；删除三个并行度设置可恢复拓扑搜索。示例开启 smoke，正式结果需设置 `smoke: false`。
 
 `engine` 默认为 `sglang`。`engine_options` 目前仅用于 vLLM，拒绝未知字段和任意 shell/额外参数：
 
@@ -136,7 +138,7 @@ python3 benchctl.py auto --config configs/experiment.vllm.json
 - `moe_backend`、`all2all_backend`：可选原生参数，要求镜像广告相应 CLI。`search.backends` 在 vLLM 下表示原生 MoE backend，与 `moe_backend` 不能同时配置；默认交给引擎 AUTO，不调用 SGLang 的解析或去重流程。
 - `speculative_config`：基线默认不启用；可显式配置 `{"method":"deepseek_mtp","num_speculative_tokens":5}`，需对应 backport 版本支持。未显式限定时，可按镜像实际结构和顾问建议生成原生方法对照；不把 SGLang DSpark 直接映射成 vLLM 投机解码。
 
-DeepSeek-V4 的自动工具/推理 parser 映射为 vLLM 的 `deepseek_v4`。显式 `model_overrides` 的 parser 名称优先。镜像必须支持默认聊天模板 kwargs，原始回放请求不做额外改写；请求自身的模板参数仍由服务端合并处理。其他模型若 parser 不兼容，需指定该镜像支持的原生 parser。
+DeepSeek-V4 的自动工具/推理 parser 映射为 vLLM 的 `deepseek_v4`；V4.1 使用独立的 `deepseek_v41`，不会降级到 V4 parser。自动选择以镜像实际注册的 parser 为依据；显式 `model_overrides` 名称保持原样、优先于自动映射。镜像必须支持对应模型的模板或原生编码，原始回放请求不额外改写；请求自身的模板参数仍由服务端合并处理。
 
 与 SGLang 一样，Strict 和智能调优默认使用原始请求：不要求 `max_input_tokens`、`max_output_tokens`，不截断或补齐输入；请求自带的 `max_tokens` / `max_completion_tokens` 原样保留，没有则不添加。显式场景输出上限仍按既有规则收紧请求。旧计划保留冻结的上下文及输出限制，修改配置后应重新生成计划。
 
@@ -175,16 +177,16 @@ python3 benchctl.py auto --config configs/experiment.json
 
 ## 自动执行的流程
 
-1. 读取 checkpoint 中的 `config.json` 等元数据，识别已适配的 Qwen、GLM MoE、DeepSeek 模型及量化信息。模型目录可以任意命名；共用架构名称的变体结合静态聊天模板识别。未适配或证据不足时给出具体原因及同文件覆盖方式，不执行模型目录里的 Python 代码进行识别。
+1. 读取 checkpoint 中的 `config.json` 等元数据，统一根配置和 `text_config` 中的文本结构、量化、混合注意力及 MoE 事实，视觉字段不冒充文本字段。模型目录可以任意命名；已知协议使用独立画像，未知架构保留为 generic，不伪造 parser 或思考参数；缺失事实保持未知，已声明但非法的值仍报错。不执行模型目录里的 Python 代码进行识别。
 2. 验证原始 JSONL，统计请求、读取请求使用的服务名称并计算 SHA-256。单次实验要求一个 `request.model` 名称，服务端使用这个名称；请求对象原样回放。
-3. 探测 GPU 数量、型号、显存、拓扑及镜像内的 SGLang 选项、parser、后端列表。按同型号/算力/显存的 GPU 分组生成部署拓扑和 TP/DP/PP 候选，过滤注意力头数等静态不兼容组合。若选择 2 张卡，会真实比较 `2卡1实例` 与 `2卡2实例`；若选择 8 张卡，会比较 `8卡1/2/4/8实例`。MIG 暂不支持。计划中的 `comparison_group` 会把同一部署、TP、PP 下可比较的普通 DP 与 DP Attention 方案放在一起；两者的 DP 数可能不同，这是因为 SGLang 开启 DP Attention 后的进程世界大小是 `TP×PP`，关闭时是 `TP×DP×PP`。
+3. 探测 GPU 数量、型号、显存、拓扑及镜像内的 SGLang/vLLM 选项、模型注册表、config 解析、parser 和后端列表，写入分层的 `model-compatibility.json`。明确不支持时阻止规划；探测失败时保留 UNKNOWN，不冒充已兼容。按同型号/算力/显存的 GPU 分组生成部署拓扑和 TP/DP/PP 候选，过滤已知静态不兼容组合。若选择 2 张卡，会真实比较 `2卡1实例` 与 `2卡2实例`；若选择 8 张卡，会比较 `8卡1/2/4/8实例`。MIG 暂不支持。计划中的 `comparison_group` 会把同一部署、TP、PP 下可比较的普通 DP 与 DP Attention 方案放在一起；两者的 DP 数可能不同，这是因为 SGLang 开启 DP Attention 后的进程世界大小是 `TP×PP`，关闭时是 `TP×DP×PP`。
 4. 对 MoE 候选，在实际配置的 Docker 镜像中使用同一启动脚本生成参数，调用该镜像的 SGLang 配置解析流程。若 `AUTO` 解析出了初始候选中没有的具体 backend，自动补入同拓扑的显式候选并再次解析；只有两者解析后的有效配置相同，才删除重复的 `AUTO`。比较时保留完整解析哈希用于审计，但会排除每次探测都会变化的端口、IPC 名称、NCCL 端口和实例 ID。显式候选解析失败时保留 `AUTO`；解析不可用或结果不确定时也保留它。此阶段不启动服务、不加载权重，结果、补充候选和去重依据写入 `backend-resolution.json` 及 `plan.json`。
-5. 默认不做单独 smoke。探索阶段直接启动候选服务并跑有用的小样本请求集。`search.start_concurrency` 和 `search.concurrency_max` 可以明确控制并发起点和终点；起点省略时按所选 GPU 数估算，例如 2 卡默认从 16 开始，8 卡默认从 64 开始。之后每次增加 16 个并发，吞吐增长不足或请求失败时停止该分支，并测试内存比例和 prefill 大小的少量邻近设置。
+5. 默认不做单独 smoke。新 Flash 及 generic 画像在每个实例就绪后、计时回放前做少量非计分文本协议检查；明确协议错误阻止本轮回放，证据不足单独告警，不把吞吐有效当作语义已验证，详见兼容指南。随后探索阶段跑有用的小样本请求集。`search.start_concurrency` 和 `search.concurrency_max` 可以明确控制并发起点和终点；起点省略时按所选 GPU 数估算，例如 2 卡默认从 16 开始，8 卡默认从 64 开始。之后每次增加 16 个并发，吞吐增长不足或请求失败时停止该分支，并测试内存比例和 prefill 大小的少量邻近设置。
 6. 探索层和全量层都不使用固定 topK：所有与当前 top1 输出 tokens/s 差距在 `promotion_tolerance` 内的候选点都会晋级或复跑。最终层使用完整请求集独立重复验证，按输出 tokens/s 中位数选赢家。只有请求成功、服务端 completion usage 可用、输入摘要一致且实际服务参数可核验的结果才参与排名。
 
 每个试验点启动新容器和新服务。模型、输入、索引及脚本只读挂载；结果单独写入。容器只接收选中的物理 GPU，服务进程使用从 0 开始的逻辑编号。回放通过容器内 loopback 访问服务，不占用宿主机固定端口。启动前会检查挂载的 `.sh`、`.py` 和 `.env` 文件；如果上传过程把 LF 转成了 CRLF，会在本次 run 的结果目录下生成 LF 副本并使用它，不修改原始 LLMPerf 目录。
 
-自动方案的被测服务默认开启 max thinking：`thinking=true`、`enable_thinking=true`、`reasoning_effort=max`，SGLang 与 vLLM 使用相同默认值；`model_overrides.chat_template_kwargs` 可显式覆盖，包括关闭思考。镜像和模型模板需支持 `max`，实际是否生效应在目标服务验证，不会静默降为 `high`。原始请求对象仍原样回放，请求自身的模板参数按引擎合并规则处理，采样参数和输出长度不参与吞吐调优。这些是被测服务设置，与 `advisor` 的思考和回答预算独立。旧计划中已冻结的 `high` 或显式模板配置保持不变，要使用新默认值需重新生成计划。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
+已知画像的被测服务默认开启 max thinking，但参数按协议分别设置：DeepSeek V4.1 使用 `thinking=true`、`reasoning_effort=max`；新 Qwen/GLM Flash 使用 `enable_thinking=true`、`reasoning_effort=max`；旧画像保留原有三个 kwargs；generic 不注入思考参数。`model_overrides.chat_template_kwargs` 可显式覆盖，包括关闭思考。镜像和模型模板需支持所选参数，实际是否生效应在目标服务验证，不会静默降为 `high`。原始请求对象仍原样回放，请求自身的模板参数按引擎合并规则处理，采样参数和输出长度不参与吞吐调优。这些是被测服务设置，与 `advisor` 的思考和回答预算独立。旧计划保持冻结配置，要使用新适配需重新生成计划。索引在宿主机使用标准库生成，不加载 tokenizer；其中不生成估算 token 统计，吞吐计量使用服务端返回的 usage。
 
 如果候选服务在启动阶段因为参数不支持、参数不匹配或其他配置错误而失败，当前 candidate 会记录为 `FAILED`；只有服务已经就绪、原生参数证据明确指出所请求的显式 MoE runner backend 不受支持时，后续使用同一 backend 的候选才会记录为 `SKIPPED`。未就绪、缺少证据、OOM、模型加载失败和拓扑相关参数不匹配只影响当前 candidate。引擎自动选择的 `auto` 没有可确认的 backend，不会据此误跳过其他候选。回放阶段的请求失败或 OOM 只停止当前 candidate 的并发分支。失败候选和 backend 跳过原因会写入 `search-state.json`、`results-index.json` 和 `best.json`。需要复查时可在前端对单个 candidate 使用“单独重跑这个参数”，该入口不受自动搜索的 backend 跳过状态影响。
 
@@ -243,7 +245,7 @@ python3 benchctl.py auto --config configs/experiment.json
 
 自动规划会生成 `AUTO` 和初始后端候选。镜像若根据权重布局等信息把 `AUTO` 解析为初始计划之外的 backend，规划会自动补入该显式候选，验证等价后再删除重复的 `AUTO`。因此这类 MXFP4 模型最终通常会保留 `flashinfer_mxfp4`、`triton`、`deep_gemm`、`flashinfer_trtllm` 作为可测的显式实现，同时去掉已被确认等价的 `AUTO`；这些显式后端是吞吐搜索维度，不是手动配置项。`search.backends` 仍可限制搜索范围，不会被自动补入的后端突破。`search.open_loop_scales` 可选，例如 `[1, 2, 4]`，在闭环赢家验证之后按原始时间戳进行开环回放；默认不运行开环。开环结果独立记录，不用于替换闭环吞吐赢家。
 
-特殊模型适配可以通过同文件的 `model_overrides` 覆盖已支持的 parser、模板参数或模型专用环境变量，覆盖会记录来源。Docker 的网络、共享内存、IPC 和内部端口也可通过 `docker` 对象覆盖。内部服务端口默认是 `25080`；不要设置到常见 Linux 临时端口范围 `32768-60999`，因为 SGLang 启动时也会从该范围分配内部通信端口。拼错或不支持的字段会报错。
+特殊模型适配可以通过同文件的 `model_overrides` 覆盖 parser、模板参数或模型专用环境变量，覆盖会记录来源；这不能给旧镜像添加新架构或 kernel，也不能把 V4.1 伪装成 V4。仅声明 `expert_dtype=fp4` 而没有可靠布局证据时，默认从引擎 AUTO 解析开始，不直接猜成 MXFP4 后端；显式 `search.backends` 仍优先。Docker 的网络、共享内存、IPC 和内部端口也可通过 `docker` 对象覆盖。内部服务端口默认是 `25080`；不要设置到常见 Linux 临时端口范围 `32768-60999`，因为 SGLang 启动时也会从该范围分配内部通信端口。拼错或不支持的字段会报错。
 
 ## 结果与恢复
 
@@ -252,11 +254,13 @@ python3 benchctl.py auto --config configs/experiment.json
 ```text
 resolved-config.json       # 完整配置、模型/输入事实与参数来源
 environment.json          # GPU、镜像和引擎能力快照
+model-compatibility.json  # 架构/config/parser/编码/量化/运行时的分层诊断
 data/replay_index.json    # 绑定原始输入的回放索引
 backend-resolution.json   # 镜像内配置解析结果及 AUTO 去重依据（MoE）
 plan.json                 # 自动生成的候选和搜索范围
 search-state.json         # 已分配的试验、预算和停止原因
 trials/.../attempt-001/   # 每个点的命令、服务信息、日志、原始结果与 trial.json
+                         # 新画像包含 server.protocol.json 非计分协议检查证据
 results-index.json        # 汇总所有已结束的试验
 leaderboard.json          # 当前有效试验按输出 tokens/s 排名
 best-so-far.json          # 当前已完成试验中的临时最佳点
