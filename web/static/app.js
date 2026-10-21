@@ -494,7 +494,7 @@ function renderAdaptiveDecisions(rows, strategy) {
   box.hidden = strategy !== "adaptive";
   if (box.hidden) return;
   if (!rows.length) {
-    box.innerHTML = '<h3>反馈决策</h3><p class="hint">尚未执行。顾问只选池内候选，最终推荐由实测复验决定。</p>';
+    box.innerHTML = '<h3>反馈决策</h3><p class="hint">尚未执行。顾问按计划权限选点或提交配置补丁，最终推荐由实测复验决定。</p>';
     return;
   }
   var html = '<h3>反馈决策</h3><div class="table-wrap"><table><thead><tr><th>轮次</th><th>来源 / 状态</th><th>依据 / 降级原因</th><th>下一批候选</th></tr></thead><tbody>';
@@ -506,10 +506,14 @@ function renderAdaptiveDecisions(rows, strategy) {
     var explanation = diagnosis.hypothesis || row.reason || "";
     var recommendations = (row.recommendations || []).map(function(item) {
       return item.candidate_id + ": " + (item.reason || "") + " " + (item.expected_effect || "");
-    }).join("; ");
+    }).concat((row.proposals || []).map(function(item) {
+      return item.base_id + " → " + item.candidate_id + ": " + JSON.stringify(item.patch) + " " + (item.reason || "");
+    })).join("; ");
     html += '<tr><td>' + escapeHtml(row.id) + '</td><td>' + escapeHtml(row.source) + ' / ' + escapeHtml(row.status) +
       '<div class="small">' + escapeHtml(requestInfo) + '</div></td><td>' + escapeHtml(explanation) + '<div class="small">' + escapeHtml(recommendations) +
-      '</div><div class="small">' + escapeHtml((row.validation_rejections || []).join(", ")) +
+      '</div><div class="small">' + escapeHtml((row.validation_rejections || []).map(function(item) {
+        return typeof item === "string" ? item : JSON.stringify(item);
+      }).join(", ")) +
       '</div></td><td class="code">' + escapeHtml((row.selected || []).join(", ")) + '</td></tr>';
   });
   box.innerHTML = html + '</tbody></table></div>';

@@ -16,6 +16,7 @@ from typing import Any
 from .adapters import ReplayAdapter, read_attempt
 from .advisor import LocalAdvisor, ask_advisor, runtime_advisor_spec
 from .adaptive import AdaptiveScheduler, build_candidate_pool
+from .candidate_repair import configuration_defects
 from .evidence import redact
 from .artifacts import sha256_file, write_json_atomic
 from .backend_resolution import apply_backend_resolution, expand_auto_backends, resolve_in_image
@@ -401,7 +402,8 @@ def plan_tuning(config_path: str | Path, *, use_captured: bool = True,
         pool = build_candidate_pool(bases, catalog["knobs"], scene["target_concurrency"],
                                     capacity, seeds=selected.values(), feature_catalog=catalog.get("engine_catalog"))
         selected = {candidate.id: candidate for candidate in pool}
-        template.metadata["adaptive_policy"] = {"version": 1, **asdict(config.search.adaptive)}
+        template.metadata["adaptive_policy"] = {"version": 2, **asdict(config.search.adaptive),
+            "max_generated_candidates": min(capacity, config.search.max_trials)}
         template.metadata["runtime_advisor"] = runtime_advisor_spec(config.advisor, config_path)
         secrets = (config.advisor.get("authorization", "").removeprefix("Bearer "),)
         selected = {ident: replace(candidate, reasons=tuple(redact(candidate.reasons, secrets)))
@@ -623,6 +625,12 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
         _result_length_evidence(result, scene)
         result["score"] = _metric(result, scene["priority"])
         if adaptive:
+            if result["score"] is None:
+                defects = configuration_defects(candidates[candidate_id], plan.metadata.get("engine_catalog"),
+                                                scheduler.summary(result, candidate_id))
+                if defects:
+                    result.update(failure_kind="configuration", configuration_errors=defects,
+                                  backend_unsupported=False)
             result["trial_seconds"] = time.monotonic() - trial_started
             result = redact(result, scheduler.secrets)
             result["artifact_fingerprints"] = []
@@ -692,6 +700,9 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
                 break
             pending = scheduler.next_batch(available, min(ADVISOR_TIMEOUT_SECONDS, time_available), time_available)
             if not pending:
+                if scheduler.can_propose():
+                    state["decisions"].append({"reason": "runtime_proposal_retry"})
+                    continue
                 state["decisions"].append({"reason": "candidate_pool_exhausted"})
                 break
             if max_seconds - elapsed() <= reserve * estimated_repeat_seconds():
@@ -836,6 +847,9 @@ def execute_tuning_plan(plan: Plan, run_root: str | Path, *, executor=None,
             "finalist_ids": state["finalist_ids"],
             "baseline_verified": baseline_validated is not None,
             "elapsed_seconds": elapsed(),
+            "generated_candidates": [proposal["candidate"]["id"]
+                for entry in scheduler.progress["records"] if entry.get("sha256")
+                for proposal in scheduler._read_decision(entry).get("proposals", [])],
         })
         report = _jsonable(report)
     write_json_atomic(root / "best.json", report)

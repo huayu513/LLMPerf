@@ -49,8 +49,12 @@ def observed_knobs(catalog):
     methods = spec.get("method", {}).get("choices", [])
     if "speculative_config" in catalog["parameters"] and methods:
         count = spec.get("num_speculative_tokens", {}).get("default")
-        knobs["speculative_config"] = [{"method": method, **({"num_speculative_tokens": count}
-            if type(count) is int and count > 0 else {})} for method in methods if isinstance(method, str)][:8]
+        # Method names alone are not runnable configurations. Let evidence-backed
+        # advisor proposals supply a length if the image has no positive default.
+        if type(count) is int and count > 0:
+            knobs["speculative_config"] = [
+                {"method": method, "num_speculative_tokens": count}
+                for method in methods if isinstance(method, str)][:8]
     return knobs
 
 
@@ -153,20 +157,40 @@ def _needs_device_context(report):
                ("failed to infer device type", "no cuda gpus are available", "no cuda-capable device"))
 
 
-def preflight_candidates(plan, config, root, *, runner=subprocess.run):
+def preflight_candidates(plan, config, root, *, runner=subprocess.run, timeout_seconds=180):
     catalog = plan.metadata["engine_catalog"]
     schema = plan.metadata["environment"].get("container", {}).get("capabilities", {}).get("schema", {})
-    report = {"version": 2, "scope": "native_parser_only", "runtime_verified": False,
-              "results": [], "attempts": [], "timeout_seconds": 180}
+    report = {"version": 3, "scope": "native_parser_and_configuration", "runtime_verified": False,
+              "results": [], "attempts": [], "timeout_seconds": max(0.01, min(180, timeout_seconds))}
     if schema.get("status") != "discovered":
         report["status"] = "unknown"
         report["reason"] = "structured_parser_not_discovered"
     else:
         cases = []
+        model_path = getattr(config, "model_path", None)
+        model_context = (config.engine == "vllm" and model_path is not None and
+                         "model" in catalog["parameters"] and
+                         any(candidate.static_config.get("speculative_config") for candidate in plan.candidates))
         for candidate in plan.candidates:
             static = candidate.static_config
             contract = native_contract(static, catalog)
             argv = list(contract["append"])
+            scheduling = (("mem_fraction_static", "max_running_requests", "chunked_prefill_size")
+                          if config.engine == "sglang" else
+                          ("gpu_memory_utilization", "max_num_seqs", "max_num_batched_tokens"))
+            for name in scheduling:
+                item = catalog["parameters"].get(name)
+                if item and name in static:
+                    argv += [item["flags"][0], str(static[name])]
+            if config.engine == "vllm":
+                trust = catalog["parameters"].get("trust_remote_code")
+                if trust:
+                    argv.append(trust["flags"][0])
+                for name in ("max_model_len", "quantization"):
+                    item = catalog["parameters"].get(name)
+                    value = static.get(name, plan.metadata.get(name))
+                    if item and value is not None:
+                        argv += [item["flags"][0], str(value)]
             names = (("tp_size", "tp"), ("dp_size", "dp"), ("pp_size", "pp")) if config.engine == "sglang" else (
                 ("tensor_parallel_size", "tp"), ("data_parallel_size", "dp"), ("pipeline_parallel_size", "pp"))
             for name, key in names:
@@ -178,7 +202,8 @@ def preflight_candidates(plan, config, root, *, runner=subprocess.run):
             model = catalog["parameters"].get("model_path" if config.engine == "sglang" else "model")
             if model:
                 argv += [model["flags"][0], "/model"]
-            cases.append({"id": candidate.id, "argv": argv})
+            cases.append({"id": candidate.id, "argv": argv,
+                          "model_context": bool(model_context and static.get("speculative_config"))})
         path = root / "native-preflight-input.json"
         write_json_atomic(path, cases)
         source = (Path(__file__).resolve().parents[1] / "benchmarks/server/image_capabilities.py").read_text()
@@ -198,8 +223,11 @@ def preflight_candidates(plan, config, root, *, runner=subprocess.run):
             env = {"CUDA_VISIBLE_DEVICES": ",".join(map(str, range(len(indexes)))),
                    "NVIDIA_DRIVER_CAPABILITIES": "compute,utility"} if indexes else {
                        "CUDA_VISIBLE_DEVICES": "", "NVIDIA_VISIBLE_DEVICES": "void"}
+            mounts = [Mount(path, "/cases.json", True)]
+            if model_context:
+                mounts.append(Mount(Path(model_path), "/model", True))
             spec = DockerTaskSpec(config.image, "capability-preflight-" + uuid.uuid4().hex[:12],
-                gpu_indexes=indexes, mounts=(Mount(path, "/cases.json", True),), env=env,
+                gpu_indexes=indexes, mounts=tuple(mounts), env=env,
                 entrypoint="python3", command=("-c", script), network_mode="none")
             attempt = {"attempt": len(report["attempts"]) + 1, "device_context": device_context,
                        "gpu_indexes": list(indexes), "timeout_seconds": remaining}

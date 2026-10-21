@@ -9,6 +9,7 @@ import importlib
 import inspect
 import io
 import json
+import re
 import typing
 
 
@@ -107,6 +108,9 @@ def collect_schema(engine):
                     name: {**annotation_info(annotation),
                            "default": plain(fields[name].default) if name in fields else None,
                            "default_known": name in fields and fields[name].default is not dataclasses.MISSING,
+                           "required": name in fields and fields[name].init and
+                               fields[name].default is dataclasses.MISSING and
+                               fields[name].default_factory is dataclasses.MISSING,
                            "source": spec_module.__name__ + ":" + name}
                     for name, annotation in hints.items() if not name.startswith("_")}
                 result["documents"][spec_module.__name__] = source_document(spec_module, keywords)
@@ -116,6 +120,27 @@ def collect_schema(engine):
     except Exception as exc:
         result["errors"].append(type(exc).__name__ + ": " + str(exc)[:500])
     return result
+
+
+def validate_native_configuration(engine, namespace, model_context=False):
+    """Exercise nested validators, without loading weights or starting a server."""
+    if engine != "vllm":
+        return
+    spec = getattr(namespace, "speculative_config", None)
+    if spec is None:
+        return
+    if model_context:
+        # EngineArgs supplies target model/parallel configs to SpeculativeConfig.
+        # This loads local metadata only; model weights and a server are not created.
+        args = importlib.import_module("vllm.engine.arg_utils").EngineArgs.from_cli_args(namespace)
+        args.create_engine_config()
+        return
+    if isinstance(spec, str):
+        spec = json.loads(spec)
+    if not isinstance(spec, dict):
+        raise ValueError("speculative_config must be a JSON object")
+    module = importlib.import_module("vllm.config.speculative")
+    module.SpeculativeConfig(**spec)
 
 
 def preflight(engine, cases):
@@ -128,14 +153,38 @@ def preflight(engine, cases):
                  "reason": type(exc).__name__ + ": " + str(exc)[:500]} for case in cases]
     for case in cases:
         diagnostics = io.StringIO()
+        scope = "native_parser"
         try:
             with contextlib.redirect_stdout(diagnostics), contextlib.redirect_stderr(diagnostics):
-                parser.parse_args(case["argv"])
-            result = {"status": "preflight_passed", "scope": "native_parser",
+                namespace = parser.parse_args(case["argv"])
+                if engine == "vllm" and getattr(namespace, "speculative_config", None) is not None:
+                    scope = "native_configuration"
+                validate_native_configuration(engine, namespace, case.get("model_context", False))
+            result = {"status": "preflight_passed", "scope": scope,
                       "runtime_verified": False}
         except (argparse.ArgumentError, SystemExit) as exc:
             result = {"status": "parser_rejected", "scope": "native_parser",
                       "reason": type(exc).__name__ + ": " + str(exc)[:500] + " " + diagnostics.getvalue()[-1500:]}
+        except (ValueError, AssertionError) as exc:
+            reason = type(exc).__name__ + ": " + str(exc)[:2000]
+            errors = getattr(exc, "errors", None)
+            details = [{"field": ".".join(map(str, row.get("loc", ()))),
+                        "type": str(row.get("type", "")), "message": str(row.get("msg", ""))[:500]}
+                       for row in errors()[:16]] if callable(errors) else []
+            message = "\n".join(row["message"] for row in details) if details else reason.split("[type=", 1)[0]
+            # Some versions need a target ModelConfig even to construct the
+            # nested object. Lack of that context is not proof of invalid input.
+            context_missing = bool(re.search(
+                r"(?:target_model_config|draft_model_config)\s+(?:must|should|is required|is missing|cannot|can't)|"
+                r"(?:requires?|missing)\s+(?:a\s+)?(?:target_model_config|draft_model_config)", message, re.I)) or any(
+                    marker in message.lower() for marker in (
+                        "failed to infer device type", "no cuda gpus", "no cuda-capable device")) or any(
+                    row["type"] == "missing" and row["field"] in {"target_model_config", "draft_model_config"}
+                    for row in details)
+            result = {"status": "unknown" if context_missing else "parser_rejected", "scope": scope,
+                      "reason": reason, "failure_kind": "configuration"}
+            if details:
+                result["configuration_errors"] = details
         except Exception as exc:
             result = {"status": "unknown", "scope": "native_parser",
                       "reason": type(exc).__name__ + ": " + str(exc)[:500] + " " + diagnostics.getvalue()[-1500:]}
