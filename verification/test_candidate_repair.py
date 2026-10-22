@@ -320,6 +320,49 @@ class RuntimeRepairTests(unittest.TestCase):
         self.assertFalse(scheduler.blocked(fixed))
         self.assertFalse(scheduler.blocked(self.candidates["baseline"]))
 
+    def test_failure_preserves_independent_pending_candidates_for_both_policies(self):
+        self.metadata["engine_catalog"]["nested"] = {}
+        self.metadata["adaptive_policy"]["batch_size"] = 3
+        for version in (1, 2):
+            for kind, phase in (("oom", "startup"), ("configuration", "startup"), ("timeout", "replay")):
+                with self.subTest(version=version, kind=kind, phase=phase):
+                    self.metadata["adaptive_policy"]["version"] = version
+                    self.state = {"plan_hash": "plan", "observations": [], "decisions": []}
+                    advisor = SimpleNamespace(ask=lambda *_: self.fail("pending batch must finish before feedback"))
+                    scheduler = self.scheduler(advisor)
+                    batch = list(scheduler.next_batch(8, 5))
+                    self.assertEqual(len(batch), 3)
+                    result = {"candidate_id": batch[0], "status": "FAILED", "score": None,
+                              "failure_kind": kind, "failure_phase": phase}
+                    self.state["observations"].append(result)
+                    scheduler.consume(batch[0], result)
+                    self.assertEqual(scheduler.next_batch(7, 5), batch[1:])
+                    self.assertEqual(self.state["decisions"], [])
+
+    def test_failed_batch_only_skips_peers_with_the_confirmed_missing_field(self):
+        self.metadata["engine_catalog"]["nested"] = {}
+        self.metadata["adaptive_policy"].update(batch_size=4)
+        self.metadata["baseline_candidate_id"] = "broken"
+        fixed = copy.deepcopy(self.candidates["same-defect"])
+        fixed["id"] = "fixed"
+        fixed["static_config"]["speculative_config"]["num_speculative_tokens"] = 3
+        self.candidates["fixed"] = fixed
+        advisor = SimpleNamespace(ask=lambda *_: self.fail("independent pending trials must still run"))
+        scheduler = self.scheduler(advisor)
+        batch = list(scheduler.next_batch(8, 5))
+        self.assertEqual(batch[0], "broken")
+        self.assertEqual(set(batch), set(self.candidates))
+        result = {"candidate_id": "broken", "status": "FAILED", "score": None,
+            "failure_kind": "configuration", "failure_phase": "startup", "evidence_summary": {
+                "log_excerpts": [{"tail": "ValidationError for SpeculativeConfig: num_speculative_tokens must be set"}]}}
+        self.state["observations"].append(result)
+        scheduler.consume("broken", result)
+        expected = [ident for ident in batch[1:] if ident != "same-defect"]
+        self.assertEqual(scheduler.next_batch(7, 5), expected)
+        self.assertEqual(self.state["decisions"], [{"reason": "known_configuration_defect",
+            "observed_candidate_id": "broken", "cancelled_candidates": ["same-defect"]}])
+        self.assertEqual(self.scheduler(advisor).next_batch(7, 5), expected)
+
 
 if __name__ == "__main__":
     unittest.main()
