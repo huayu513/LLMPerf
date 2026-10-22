@@ -72,6 +72,29 @@ def proposal_matches(static, params, catalog):
                for name, value in params.items())
 
 
+def missing_native_fields(static, catalog):
+    """Controller requirements backed by fields discovered in this image.
+
+    DSPARK experiments must state their draft length when the image provides no
+    usable default. Other methods may infer it from model metadata, so do not
+    impose this condition on every speculative method.
+    """
+    spec = static.get("speculative_config")
+    fields = catalog.get("nested", {}).get("speculative_config", {})
+    if not isinstance(spec, dict):
+        return []
+    missing = [name for name, item in fields.items() if item.get("required") and name not in spec
+               and item.get("type") in {"integer", "number", "boolean", "string"}
+               and not re.search(r"model|path|revision|quantization|tokenizer|device|cache", name)]
+    count = fields.get("num_speculative_tokens")
+    if str(spec.get("method", "")).lower() == "dspark" and count is not None:
+        default = count.get("default")
+        if ("num_speculative_tokens" not in spec and not (type(default) is int and default > 0)
+                and "num_speculative_tokens" not in missing):
+            missing.append("num_speculative_tokens")
+    return ["speculative_config." + name for name in missing]
+
+
 def validate_value(name, value, catalog):
     parameter = catalog["parameters"].get(name)
     if parameter is None:
@@ -100,6 +123,9 @@ def validate_value(name, value, catalog):
                    if item.get("type") in {"integer", "number", "boolean", "string"} or item.get("choices")}
         if not value or "method" not in value or set(value) - set(allowed):
             raise ValueError("speculative_config: undiscovered or non-scalar fields")
+        missing = missing_native_fields({name: value}, catalog)
+        if missing:
+            raise ValueError("missing required native fields: " + ", ".join(missing))
         for key, child in value.items():
             if re.search(r"model|path|revision|quantization|tokenizer|device|cache", key):
                 raise ValueError(f"speculative_config.{key}: changes a protected test condition")

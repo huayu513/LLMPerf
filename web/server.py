@@ -44,6 +44,7 @@ from llmperf.advisor import extract_and_save_scenario  # noqa: E402
 from llmperf.docker_runtime import DockerRuntime  # noqa: E402
 from llmperf.planner import fingerprint, load_plan, plan_to_dict  # noqa: E402
 from llmperf.feature_catalog import native_contract, native_summary  # noqa: E402
+from llmperf.candidate_repair import runtime_candidate_records  # noqa: E402
 from benchmarks.server.native_args import transform
 from benchmarks.server.vllm_config import command_args, launch_config, requested_parameters
 from llmperf.search import (  # noqa: E402
@@ -210,8 +211,26 @@ def candidate_static(candidate: dict[str, Any]) -> dict[str, Any]:
     return static if isinstance(static, dict) else {}
 
 
+def with_runtime_candidates(plan: dict, run_dir: Path) -> dict:
+    if not isinstance(plan, dict):
+        return {}
+    plan = copy.deepcopy(plan)
+    candidates = plan.setdefault("candidates", [])
+    known = {row.get("id") for row in candidates}
+    metadata = plan.setdefault("metadata", {})
+    preflight = metadata.setdefault("native_preflight", {}).setdefault("results", [])
+    for record in runtime_candidate_records(run_dir):
+        candidate = record["candidate"]
+        if candidate["id"] not in known:
+            candidates.append({**candidate, "runtime_proposal": {
+                **record["request"], "decision": record["decision"]}})
+            preflight.extend(record["preflight"]["results"])
+            known.add(candidate["id"])
+    return plan
+
+
 def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
-    plan = json_load(run_dir / "plan.json", {})
+    plan = with_runtime_candidates(json_load(run_dir / "plan.json", {}), run_dir)
     metadata = plan.get("metadata", {}) if isinstance(plan, dict) else {}
     preflights = {row["id"]: row for row in metadata.get("native_preflight", {}).get("results", [])}
     raw_candidates = plan.get("candidates", []) if isinstance(plan, dict) else []
@@ -263,6 +282,7 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
             "attn_dp_size": static.get("attn_dp_size"),
             "native_features": native_summary(static),
             "native_preflight": preflights.get(candidate.get("id"), {"status": "unknown"}),
+            "runtime_proposal": candidate.get("runtime_proposal"),
             "gpu_indexes": candidate.get("gpu_indexes", static.get("gpu_indexes", [])),
             "deployment_label": deployment.get("label"),
             "instance_count": deployment.get("instance_count"),
@@ -286,7 +306,7 @@ def plan_candidates(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def plan_order_map(run_dir: Path) -> dict[str, int]:
-    plan_doc = json_load(run_dir / "plan.json", {})
+    plan_doc = with_runtime_candidates(json_load(run_dir / "plan.json", {}), run_dir)
     raw_candidates = plan_doc.get("candidates", []) if isinstance(plan_doc, dict) else []
     result: dict[str, int] = {}
     for idx, candidate in enumerate(raw_candidates if isinstance(raw_candidates, list) else []):
@@ -343,7 +363,7 @@ def trial_rows(run_dir: Path, include_debug: bool = True) -> list[dict[str, Any]
 
 
 def candidate_detail(run_dir: Path, candidate_id: str) -> dict[str, Any]:
-    plan_doc = json_load(run_dir / "plan.json", {})
+    plan_doc = with_runtime_candidates(json_load(run_dir / "plan.json", {}), run_dir)
     candidates = plan_doc.get("candidates", []) if isinstance(plan_doc, dict) else []
     candidate = next((c for c in candidates if isinstance(c, dict) and c.get("id") == candidate_id), None)
     if candidate is None:
@@ -1043,7 +1063,7 @@ def result_score(result: dict[str, Any]) -> float | None:
 
 def load_debug_context(run_dir: Path, candidate_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
     plan = load_plan(run_dir / "plan.json")
-    plan_doc = plan_to_dict(plan)
+    plan_doc = with_runtime_candidates(plan_to_dict(plan), run_dir)
     metadata = copy.deepcopy(plan.metadata)
     candidates = {c["id"]: c for c in plan_doc.get("candidates", []) if isinstance(c, dict) and c.get("id")}
     candidate = find_candidate(plan_doc, candidate_id)
@@ -1784,6 +1804,9 @@ def adaptive_decisions(run_dir: Path) -> list[dict[str, Any]]:
             recommendations = []
         row["recommendations"] = [item for item in recommendations
                                   if isinstance(item, dict) and item.get("candidate_id") in (row["selected"] or [])]
+        row["proposals"] = [{"candidate_id": proposal["candidate"]["id"], **proposal["request"],
+                             "preflight": proposal["preflight"]["results"][0]["status"]}
+                            for proposal in document.get("proposals", [])]
         row["status"] = row["status"] or "PENDING"
         result.append(row)
     return result

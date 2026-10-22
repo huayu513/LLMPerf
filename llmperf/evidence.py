@@ -74,7 +74,7 @@ def summarize_trial(result: dict, candidate: dict, root: Path) -> dict:
                 "latency_seconds", "ttft_seconds", "tpot_seconds", "error_rate",
                 "scene_lengths", "failure_kind", "failure_phase", "container_oom_killed",
                 "backend_unsupported", "reasons", "warnings", "memory_diagnostics", "oom_log_paths",
-                "measured_seconds", "trial_seconds", "model_runtime_verified")
+                "measured_seconds", "trial_seconds", "model_runtime_verified", "configuration_errors")
                if key in result}
     protocol = result.get("protocol_validation")
     if isinstance(protocol, dict):
