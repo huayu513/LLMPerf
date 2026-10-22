@@ -35,7 +35,7 @@
     "authorization": "Bearer <你的实际令牌>",
     "timeout_seconds": 2000,
     "thinking": true,
-    "reasoning_effort": "max",
+    "reasoning_effort": "high",
     "task_max_tokens": {
       "scene": 100000,
       "candidates": 100000,
