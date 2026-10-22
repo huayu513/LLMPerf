@@ -494,15 +494,15 @@ class AdaptiveScheduler:
         if not self.progress["pending"] or self.progress["pending"][0] != candidate_id:
             raise ConfigError("trial does not match its accepted adaptive decision")
         self.progress["pending"].pop(0)
-        # Re-evaluate even an existing pending batch after every failure. This
-        # also covers a defect learned from an old image's native error text.
-        self.progress["pending"] = [ident for ident in self.progress["pending"]
-                                     if not self.blocked(self.candidates[ident])]
+        # A batch groups experiments, not dependencies. Keep independent trials
+        # in order; only explicit configuration evidence can invalidate a peer.
+        blocked = [ident for ident in self.progress["pending"]
+                   if self.blocked(self.candidates[ident])]
+        if blocked:
+            self.progress["pending"] = [ident for ident in self.progress["pending"] if ident not in blocked]
+            self.state["decisions"].append({"reason": "known_configuration_defect",
+                "observed_candidate_id": candidate_id, "cancelled_candidates": blocked})
         if result.get("score") is None:
             signature = [result.get("failure_kind"), result.get("failure_phase"), result.get("status")]
             if signature not in self.progress["failure_signatures"]:
                 self.progress["failure_signatures"].append(signature)
-                if self.progress["pending"]:
-                    self.state["decisions"].append({"reason": "new_failure_feedback",
-                        "cancelled_candidates": list(self.progress["pending"])})
-                    self.progress["pending"] = []
