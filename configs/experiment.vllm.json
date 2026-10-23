@@ -14,7 +14,7 @@
   "gpu_indexes": [0, 1, 2, 3, 4, 5, 6, 7],
   "smoke": false,
   "engine_options": {
-    "gpu_memory_utilization": 0.9,
+    "gpu_memory_utilization": 0.85,
     "max_num_seqs": 64,
     "max_num_batched_tokens": 16384,
     "enforce_eager": false
@@ -35,7 +35,7 @@
     "authorization": "Bearer <你的实际令牌>",
     "timeout_seconds": 2000,
     "thinking": true,
-    "reasoning_effort": "max",
+    "reasoning_effort": "high",
     "task_max_tokens": {
       "scene": 100000,
       "candidates": 100000,
