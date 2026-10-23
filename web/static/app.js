@@ -497,7 +497,9 @@ function renderAdaptiveDecisions(rows, strategy) {
     box.innerHTML = '<h3>反馈决策</h3><p class="hint">尚未执行。顾问按计划权限选点或提交配置补丁，最终推荐由实测复验决定。</p>';
     return;
   }
-  var html = '<h3>反馈决策</h3><div class="table-wrap"><table><thead><tr><th>轮次</th><th>来源 / 状态</th><th>依据 / 降级原因</th><th>下一批候选</th></tr></thead><tbody>';
+  var html = '<h3>反馈决策</h3><div class="table-wrap"><table class="adaptive-decisions-table">' +
+    '<colgroup><col class="decision-round-col"><col class="decision-status-col"><col><col class="decision-candidates-col"></colgroup>' +
+    '<thead><tr><th>轮次</th><th>来源 / 状态</th><th>依据 / 降级原因</th><th>下一批候选</th></tr></thead><tbody>';
   rows.forEach(function(row) {
     var diagnosis = row.diagnosis || {};
     var requests = row.request_attempts || {};
@@ -508,13 +510,20 @@ function renderAdaptiveDecisions(rows, strategy) {
       return item.candidate_id + ": " + (item.reason || "") + " " + (item.expected_effect || "");
     }).concat((row.proposals || []).map(function(item) {
       return item.base_id + " → " + item.candidate_id + ": " + JSON.stringify(item.patch) + " " + (item.reason || "");
-    })).join("; ");
+    }));
+    var rejections = row.validation_rejections || [];
     html += '<tr><td>' + escapeHtml(row.id) + '</td><td>' + escapeHtml(row.source) + ' / ' + escapeHtml(row.status) +
-      '<div class="small">' + escapeHtml(requestInfo) + '</div></td><td>' + escapeHtml(explanation) + '<div class="small">' + escapeHtml(recommendations) +
-      '</div><div class="small">' + escapeHtml((row.validation_rejections || []).map(function(item) {
-        return typeof item === "string" ? item : JSON.stringify(item);
-      }).join(", ")) +
-      '</div></td><td class="code">' + escapeHtml((row.selected || []).join(", ")) + '</td></tr>';
+      '<div class="small">' + escapeHtml(requestInfo) + '</div></td><td><div class="decision-explanation">' + escapeHtml(explanation) + '</div>';
+    if (recommendations.length) html += '<ul class="decision-recommendations small">' + recommendations.map(function(item) {
+      return '<li>' + escapeHtml(item) + '</li>';
+    }).join("") + '</ul>';
+    if (rejections.length) html += '<details class="decision-rejections"><summary>建议校验 / 预检拒绝详情（' + rejections.length + '）</summary><pre>' +
+      escapeHtml(rejections.map(function(item) {
+        return typeof item === "string" ? item : JSON.stringify(item, null, 2);
+      }).join("\n\n")) + '</pre></details>';
+    html += '</td><td><ul class="decision-candidates code">' + (row.selected || []).map(function(ident) {
+      return '<li>' + escapeHtml(ident) + '</li>';
+    }).join("") + '</ul></td></tr>';
   });
   box.innerHTML = html + '</tbody></table></div>';
 }

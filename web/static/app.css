@@ -197,6 +197,10 @@ main {
   padding: 16px;
 }
 
+#run-summary {
+  min-width: 0;
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -356,6 +360,60 @@ tr.clickable:hover {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   color: #0550ae;
   word-break: break-all;
+}
+
+.adaptive-decisions-table {
+  table-layout: fixed;
+  min-width: 760px;
+}
+
+.decision-round-col {
+  width: 52px;
+}
+
+.decision-status-col {
+  width: 136px;
+}
+
+.decision-candidates-col {
+  width: 28%;
+}
+
+.adaptive-decisions-table td {
+  overflow-wrap: anywhere;
+}
+
+.decision-recommendations,
+.decision-candidates {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.decision-recommendations,
+.decision-rejections {
+  margin-top: 8px;
+}
+
+.decision-recommendations li + li,
+.decision-candidates li + li {
+  margin-top: 6px;
+}
+
+.decision-candidates {
+  word-break: normal;
+}
+
+.decision-rejections summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.decision-rejections pre {
+  margin-top: 8px;
+  max-height: 280px;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .summary-grid,
